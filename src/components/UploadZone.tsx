@@ -112,7 +112,7 @@ export const UploadZone: React.FC<UploadZoneProps> = ({ onUpload, isLoading }) =
 
       <div className="mt-8 grid grid-cols-3 gap-4">
         {[
-          { icon: FileText, label: "Excel Support", desc: ".xlsx / .xls" },
+          { icon: FileText, label: "Excel Support", desc: ".xlsx / .xlsm / .xls" },
           { icon: CheckCircle2, label: "Fácil Leitura", desc: "Mapeamento Automático" },
           { icon: Upload, label: "Semanal", desc: "Sempre Atualizado" }
         ].map((item, i) => (

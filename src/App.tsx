@@ -3,14 +3,22 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { UploadZone } from './components/UploadZone';
 import { ScheduleView } from './components/ScheduleView';
+import { DashboardView } from './components/DashboardView';
+import { HourlyConsumptionView } from './components/HourlyConsumptionView';
 import { parseExcelFile } from './lib/excel';
 import { ScheduleEntry } from './lib/utils';
-import { Layout, LogOut, Settings, HelpCircle, Activity, Search, LayoutDashboard, Moon, Sun } from 'lucide-react';
+import { Layout, LogOut, Settings, HelpCircle, Activity, Search, LayoutDashboard, Moon, Sun, BarChart3, Timer, Gauge, Download, Database } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from './lib/utils';
+import { ShiftMonitorView } from './components/ShiftMonitorView';
+import { exportToExcel } from './lib/export';
+import { KanbanCompositionView } from './components/KanbanCompositionView';
+import { Box } from 'lucide-react';
+import { format, subDays, startOfDay, isBefore } from 'date-fns';
+import { DataManagerView } from './components/DataManagerView';
 
 export default function App() {
   const [entries, setEntries] = useState<ScheduleEntry[]>([]);
@@ -19,21 +27,26 @@ export default function App() {
   const [globalSearch, setGlobalSearch] = useState('');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [currentView, setCurrentView] = useState<'schedule' | 'dashboard' | 'shift-monitor' | 'hourly-consumption' | 'kanban' | 'data-manager'>('schedule');
   const [isDark, setIsDark] = useState(() => {
     const saved = localStorage.getItem('theme');
     return saved === 'dark';
   });
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const saved = localStorage.getItem('materialflow_entries');
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
-        const hydrated = parsed.map((e: any) => ({
+        const thirtyDaysAgo = startOfDay(subDays(new Date(), 30));
+        
+        const hydratedAndFiltered = parsed.map((e: any) => ({
           ...e,
           date: new Date(e.date)
-        }));
-        setEntries(hydrated);
+        })).filter((e: any) => !isBefore(e.date, thirtyDaysAgo));
+        
+        setEntries(hydratedAndFiltered);
       } catch (e) {
         console.error("Failed to load saved data", e);
       }
@@ -62,16 +75,37 @@ export default function App() {
     setIsLoading(true);
     try {
       const parsedEntries = await parseExcelFile(file);
-      setEntries(parsedEntries);
+      
+      // Merge logic: replace existing entries for the dates found in the new file
+      const newDates = new Set(parsedEntries.map(e => format(e.date, 'yyyy-MM-dd')));
+      const filteredExisting = entries.filter(e => !newDates.has(format(e.date, 'yyyy-MM-dd')));
+      
+      const merged = [...filteredExisting, ...parsedEntries];
+      setEntries(merged);
+      setCurrentView('schedule');
     } catch (error) {
       alert(error instanceof Error ? error.message : "Erro ao processar o arquivo.");
     } finally {
       setIsLoading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
 
-  const handleReset = () => {
-    setShowResetConfirm(true);
+  const onFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) handleUpload(file);
+  };
+
+  const triggerUpload = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleDeleteDates = (datesToDelete: string[]) => {
+    const datesSet = new Set(datesToDelete);
+    setEntries(prev => {
+      const filtered = prev.filter(e => !datesSet.has(format(e.date, 'yyyy-MM-dd')));
+      return filtered;
+    });
   };
 
   const confirmReset = () => {
@@ -79,6 +113,7 @@ export default function App() {
     setGlobalSearch('');
     setIsMobileMenuOpen(false);
     setShowResetConfirm(false);
+    setCurrentView('schedule');
   };
 
   if (!isInitialized) return null;
@@ -107,20 +142,78 @@ export default function App() {
                 type="text" 
                 placeholder="buscar composto ou size" 
                 value={globalSearch}
-                onChange={(e) => setGlobalSearch(e.target.value)}
+                onChange={(e) => {
+                  setGlobalSearch(e.target.value);
+                  if (e.target.value) setCurrentView('schedule');
+                }}
                 className="w-full pl-10 pr-4 py-2.5 bg-white/5 border border-white/10 rounded-xl text-xs font-bold text-white focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition-all placeholder:text-slate-600 focus:bg-white/10"
               />
             </div>
 
             <button 
-              onClick={() => { setGlobalSearch(''); setIsMobileMenuOpen(false); }}
+              onClick={() => { setGlobalSearch(''); setCurrentView('schedule'); setIsMobileMenuOpen(false); }}
               className={cn(
                 "w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 group text-sm font-bold",
-                !globalSearch ? "bg-indigo-600 text-white shadow-lg shadow-indigo-500/20" : "text-slate-400 hover:bg-white/5 hover:text-white"
+                (currentView === 'schedule' && !globalSearch) ? "bg-indigo-600 text-white shadow-lg shadow-indigo-500/20" : "text-slate-400 hover:bg-white/5 hover:text-white"
               )}
             >
-              <LayoutDashboard className={cn("w-4 h-4", !globalSearch ? "text-white" : "text-slate-500 group-hover:text-slate-300")} />
+              <LayoutDashboard className={cn("w-4 h-4", (currentView === 'schedule' && !globalSearch) ? "text-white" : "text-slate-500 group-hover:text-slate-300")} />
               Visão Geral
+            </button>
+
+            <button 
+              onClick={() => { setGlobalSearch(''); setCurrentView('dashboard'); setIsMobileMenuOpen(false); }}
+              className={cn(
+                "w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 group text-sm font-bold",
+                currentView === 'dashboard' ? "bg-indigo-600 text-white shadow-lg shadow-indigo-500/20" : "text-slate-400 hover:bg-white/5 hover:text-white"
+              )}
+            >
+              <BarChart3 className={cn("w-4 h-4", currentView === 'dashboard' ? "text-white" : "text-slate-500 group-hover:text-slate-300")} />
+              Dashboard
+            </button>
+
+            <button 
+              onClick={() => { setGlobalSearch(''); setCurrentView('shift-monitor'); setIsMobileMenuOpen(false); }}
+              className={cn(
+                "w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 group text-sm font-bold",
+                currentView === 'shift-monitor' ? "bg-indigo-600 text-white shadow-lg shadow-indigo-500/20" : "text-slate-400 hover:bg-white/5 hover:text-white"
+              )}
+            >
+              <Timer className={cn("w-4 h-4", currentView === 'shift-monitor' ? "text-white" : "text-slate-500 group-hover:text-slate-300")} />
+              Monitor de Turno
+            </button>
+
+            <button 
+              onClick={() => { setGlobalSearch(''); setCurrentView('hourly-consumption'); setIsMobileMenuOpen(false); }}
+              className={cn(
+                "w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 group text-sm font-bold",
+                currentView === 'hourly-consumption' ? "bg-indigo-600 text-white shadow-lg shadow-indigo-500/20" : "text-slate-400 hover:bg-white/5 hover:text-white"
+              )}
+            >
+              <Gauge className={cn("w-4 h-4", currentView === 'hourly-consumption' ? "text-white" : "text-slate-500 group-hover:text-slate-300")} />
+              Consumo p/ Hora
+            </button>
+
+            <button 
+              onClick={() => { setGlobalSearch(''); setCurrentView('kanban'); setIsMobileMenuOpen(false); }}
+              className={cn(
+                "w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 group text-sm font-bold",
+                currentView === 'kanban' ? "bg-indigo-600 text-white shadow-lg shadow-indigo-500/20" : "text-slate-400 hover:bg-white/5 hover:text-white"
+              )}
+            >
+              <Box className={cn("w-4 h-4", currentView === 'kanban' ? "text-white" : "text-slate-500 group-hover:text-slate-300")} />
+              Kanban BR (Sizes)
+            </button>
+
+            <button 
+              onClick={() => { setGlobalSearch(''); setCurrentView('data-manager'); setIsMobileMenuOpen(false); }}
+              className={cn(
+                "w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 group text-sm font-bold",
+                currentView === 'data-manager' ? "bg-indigo-600 text-white shadow-lg shadow-indigo-500/20" : "text-slate-400 hover:bg-white/5 hover:text-white"
+              )}
+            >
+              <Database className={cn("w-4 h-4", currentView === 'data-manager' ? "text-white" : "text-slate-500 group-hover:text-slate-300")} />
+              Gerenciar Dados
             </button>
           </div>
         </div>
@@ -128,12 +221,25 @@ export default function App() {
         <div className="pt-6 border-t border-white/5 space-y-1">
           <p className="px-4 text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Ações</p>
           <NavItem 
+            icon={Download} 
+            label="Exportar Info (.xlsx)" 
+            onClick={() => exportToExcel(entries)}
+          />
+          <NavItem 
             icon={Layout} 
-            label="Novo Plano Semanal" 
-            onClick={handleReset}
+            label="Importar Planilha" 
+            onClick={triggerUpload}
           />
         </div>
       </nav>
+
+      <input 
+        type="file"
+        ref={fileInputRef}
+        onChange={onFileInputChange}
+        accept=".xlsx,.xlsm"
+        className="hidden"
+      />
     </>
   );
 
@@ -216,19 +322,35 @@ export default function App() {
                 <div className="text-center mb-12">
                    <h2 className="text-4xl font-black text-slate-900 dark:text-white mb-4 tracking-tight">Comece aqui</h2>
                    <p className="text-slate-500 dark:text-slate-400 max-w-lg mx-auto font-medium">
-                     Faça o upload do seu plano de produção semanal para visualizar quais materiais serão usados em cada estação.
+                     Faça o upload do seu plano de produção semanal (.xlsx ou .xlsm) para visualizar quais materiais serão usados em cada estação.
                    </p>
                 </div>
                 <UploadZone onUpload={handleUpload} isLoading={isLoading} />
               </motion.div>
             ) : (
               <motion.div
-                key="view"
+                key={currentView === 'dashboard' ? 'dashboard' : currentView === 'shift-monitor' ? 'shift-monitor' : currentView === 'hourly-consumption' ? 'hourly-consumption' : 'view'}
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -20 }}
               >
-                <ScheduleView entries={entries} onReset={handleReset} globalSearch={globalSearch} />
+                {currentView === 'dashboard' ? (
+                  <DashboardView entries={entries} />
+                ) : currentView === 'shift-monitor' ? (
+                  <ShiftMonitorView entries={entries} />
+                ) : currentView === 'hourly-consumption' ? (
+                  <HourlyConsumptionView entries={entries} />
+                ) : currentView === 'kanban' ? (
+                  <KanbanCompositionView entries={entries} />
+                ) : currentView === 'data-manager' ? (
+                  <DataManagerView 
+                    entries={entries} 
+                    onDeleteDates={handleDeleteDates}
+                    onClearAll={confirmReset}
+                  />
+                ) : (
+                  <ScheduleView entries={entries} globalSearch={globalSearch} />
+                )}
               </motion.div>
             )}
           </AnimatePresence>
