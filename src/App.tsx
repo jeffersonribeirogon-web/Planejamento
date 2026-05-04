@@ -20,7 +20,7 @@ import { Box } from 'lucide-react';
 import { format, subDays, startOfDay, isBefore } from 'date-fns';
 import { DataManagerView } from './components/DataManagerView';
 
-import { auth, loginWithGoogle, logout, db, handleFirestoreError, OperationType } from './lib/firebase';
+import { auth, loginWithGoogle, logout, loginAnonymously, db, handleFirestoreError, OperationType } from './lib/firebase';
 import { onAuthStateChanged, User } from 'firebase/auth';
 import { 
   collection, 
@@ -54,74 +54,47 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    let unsubscribeEntries: (() => void) | null = null;
-
+    // Basic auth state tracking
     const unsubscribeAuth = onAuthStateChanged(auth, async (currentUser) => {
-      // Step 1: Cleanup previous Firestore listener if it exists
-      if (unsubscribeEntries) {
-        unsubscribeEntries();
-        unsubscribeEntries = null;
-      }
-
-      setUser(currentUser);
       const adminEmail = 'jefferson.ribeiro.gon@gmail.com';
       setIsAdmin(currentUser?.email?.toLowerCase() === adminEmail);
+      setUser(currentUser);
       setIsInitializingAuth(false);
-      
-      if (currentUser) {
-        // Sync User Profile
-        try {
-          const userDocRef = doc(db, 'users', currentUser.uid);
-          await setDoc(userDocRef, {
-            userId: currentUser.uid,
-            email: currentUser.email,
-            displayName: currentUser.displayName,
-            photoURL: currentUser.photoURL,
-            createdAt: serverTimestamp()
-          }, { merge: true });
-        } catch (error) {
-          console.error("Error updating user profile:", error);
-        }
+    });
 
-        // Load Global Entries from Firestore (Shared path) - Filter to 30 days
-        const entriesRef = collection(db, 'schedule_entries');
-        const thirtyDaysAgo = startOfDay(subDays(new Date(), 30));
-        const thirtyDaysAgoStr = format(thirtyDaysAgo, 'yyyy-MM-dd');
+    // Load Global Entries from Firestore (Shared path) - Filter to 30 days
+    const entriesRef = collection(db, 'schedule_entries');
+    const thirtyDaysAgo = startOfDay(subDays(new Date(), 30));
+    const thirtyDaysAgoStr = format(thirtyDaysAgo, 'yyyy-MM-dd');
+    
+    const q = query(entriesRef, where('dateString', '>=', thirtyDaysAgoStr));
+    
+    const unsubscribeEntries = onSnapshot(q, (snapshot) => {
+      const loadedEntries: ScheduleEntry[] = [];
+      
+      snapshot.forEach((doc) => {
+        const data = doc.data();
+        const date = new Date(data.date);
         
-        const q = query(entriesRef, where('dateString', '>=', thirtyDaysAgoStr));
-        
-        unsubscribeEntries = onSnapshot(q, (snapshot) => {
-          const loadedEntries: ScheduleEntry[] = [];
-          
-          snapshot.forEach((doc) => {
-            const data = doc.data();
-            const date = new Date(data.date);
-            
-            loadedEntries.push({
-              ...data,
-              date: date
-            } as ScheduleEntry);
-          });
-          
-          setEntries(loadedEntries);
-          setIsInitialized(true);
-          setIsLoading(false);
-        }, (error) => {
-          // Only report if we still have a user (prevents race condition errors on logout)
-          if (auth.currentUser) {
-            handleFirestoreError(error, OperationType.LIST, `schedule_entries`);
-          }
-        });
-      } else {
-        setEntries([]);
-        setIsInitialized(true);
-        setIsLoading(false);
-      }
+        loadedEntries.push({
+          ...data,
+          date: date
+        } as ScheduleEntry);
+      });
+      
+      setEntries(loadedEntries);
+      setIsInitialized(true);
+      setIsLoading(false);
+    }, (error) => {
+      // Graceful error handling for public access
+      console.error("Firestore listener error:", error);
+      setIsLoading(false);
+      setIsInitialized(true);
     });
 
     return () => {
       unsubscribeAuth();
-      if (unsubscribeEntries) unsubscribeEntries();
+      unsubscribeEntries();
     };
   }, []);
 
@@ -137,10 +110,6 @@ export default function App() {
   const toggleTheme = () => setIsDark(!isDark);
 
   const handleUpload = async (file: File) => {
-    if (!user || !isAdmin) {
-      alert("Apenas administradores podem fazer upload de novos planos.");
-      return;
-    }
     setIsLoading(true);
     try {
       const parsedEntries = await parseExcelFile(file);
@@ -182,7 +151,7 @@ export default function App() {
           const entryDocRef = doc(db, 'schedule_entries', entry.id);
           batch.set(entryDocRef, {
             ...entry,
-            userId: user.uid,
+            userId: user?.uid || 'guest',
             date: entry.date.toISOString(),
             serverTimestamp: serverTimestamp()
           });
@@ -209,9 +178,43 @@ export default function App() {
     fileInputRef.current?.click();
   };
 
-  const handleDeleteDates = async (datesToDelete: string[]) => {
-    if (!user || !isAdmin) return;
+  const [showPasswordModal, setShowPasswordModal] = useState<{
+    type: 'delete-dates' | 'clear-all';
+    data?: any;
+    title: string;
+    message: string;
+  } | null>(null);
+  const [passwordInput, setPasswordInput] = useState('');
+
+  const handleActionWithPassword = (type: 'delete-dates' | 'clear-all', data?: any) => {
+    const title = type === 'clear-all' ? 'Limpar Todo o Sistema' : 'Excluir Data Selecionada';
+    const message = type === 'clear-all' 
+      ? 'Esta ação removerá todos os registros do banco de dados definitivamente.'
+      : `Você tem certeza que deseja excluir todos os registros de ${data?.[0]}?`;
     
+    setShowPasswordModal({ type, data, title, message });
+    setPasswordInput('');
+  };
+
+  const executeProtectedAction = async () => {
+    if (passwordInput !== 'Mixing') {
+      alert("Senha incorreta.");
+      return;
+    }
+
+    const action = showPasswordModal;
+    setShowPasswordModal(null);
+    setPasswordInput('');
+
+    if (action?.type === 'clear-all') {
+      await performReset();
+    } else if (action?.type === 'delete-dates') {
+      await performDeleteDates(action.data);
+    }
+  };
+
+  const performDeleteDates = async (datesToDelete: string[]) => {
+    setIsLoading(true);
     // Helper to chunk array
     function chunk<T>(arr: T[], size: number): T[][] {
       return Array.from({ length: Math.ceil(arr.length / size) }, (v, i) =>
@@ -239,11 +242,12 @@ export default function App() {
     } catch (error) {
       console.error("Error deleting dates:", error);
       alert("Erro ao excluir dados.");
+    } finally {
+      setIsLoading(false);
     }
   };
 
-  const confirmReset = async () => {
-    if (!user || !isAdmin) return;
+  const performReset = async () => {
     setIsLoading(true);
     try {
       const entriesRef = collection(db, 'schedule_entries');
@@ -266,7 +270,6 @@ export default function App() {
       
       setGlobalSearch('');
       setIsMobileMenuOpen(false);
-      setShowResetConfirm(false);
       setCurrentView('schedule');
     } catch (error) {
       console.error("Error clearing all data:", error);
@@ -276,7 +279,7 @@ export default function App() {
     }
   };
 
-  if (isInitializingAuth) {
+  if (!isInitialized) {
     return (
       <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center p-8">
         <div className="w-16 h-16 border-4 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin mb-8" />
@@ -284,73 +287,6 @@ export default function App() {
       </div>
     );
   }
-
-  if (!user) {
-    return (
-      <div className="min-h-screen bg-slate-900 dark:bg-slate-950 flex flex-col items-center justify-center p-8">
-        <div className="max-w-md w-full text-center">
-          <div className="w-20 h-20 bg-indigo-600 rounded-[2rem] flex items-center justify-center shadow-2xl shadow-indigo-500/20 text-white mx-auto mb-8">
-            <Activity className="w-10 h-10" />
-          </div>
-          <h1 className="text-3xl font-black text-white mb-4 tracking-tight uppercase">MaterialFlow</h1>
-          <p className="text-slate-400 font-bold mb-12 text-sm leading-relaxed">
-            Seu planejamento sincronizado em todos os dispositivos. Faça login para acessar seus dados.
-          </p>
-          <button 
-            disabled={isLoggingIn}
-            onClick={async () => {
-              setIsLoggingIn(true);
-              try {
-                await loginWithGoogle();
-              } catch (error: any) {
-                console.error("Login error:", error);
-                if (error.code === 'auth/popup-blocked') {
-                  alert("O bloqueador de pop-ups impediu o login. Por favor, autorize pop-ups para este site.");
-                } else if (error.code === 'auth/cancelled-popup-request' || error.code === 'auth/popup-closed-by-user') {
-                  // User closed or cancelled
-                  // If it closed immediately, it might be a domain issue
-                  console.warn("Popup closed or cancelled. If this happened immediately, check if the domain is authorized in Firebase Console.");
-                } else if (error.code === 'auth/unauthorized-domain') {
-                  alert("Este domínio não está autorizado no Firebase Console. Adicione seu domínio Vercel na aba 'Authorized Domains' no console do Firebase.");
-                } else {
-                  alert("Erro ao fazer login: " + (error.message || "Tente novamente. Verifique se o domínio está autorizado no Firebase Authentication."));
-                }
-              } finally {
-                setIsLoggingIn(false);
-              }
-            }}
-            className="w-full flex items-center justify-center gap-4 py-4 bg-white text-slate-900 rounded-2xl font-black text-sm uppercase tracking-widest hover:bg-slate-50 transition-all shadow-xl active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {isLoggingIn ? (
-              <div className="w-5 h-5 border-2 border-slate-900/20 border-t-slate-900 rounded-full animate-spin" />
-            ) : (
-              <svg className="w-5 h-5" viewBox="0 0 24 24">
-                <path fill="currentColor" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
-                <path fill="currentColor" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
-                <path fill="currentColor" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" />
-                <path fill="currentColor" d="M12 5.38c1.62 0 3.06.56 4.21 1.66l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
-              </svg>
-            )}
-            {isLoggingIn ? "Autenticando..." : "Entrar com Google"}
-          </button>
-          
-          <div className="mt-12 pt-12 border-t border-white/5 flex items-center justify-center gap-4 text-slate-500 font-bold text-[10px] uppercase tracking-widest">
-            <div className="flex items-center gap-2">
-              <Database className="w-3 h-3" />
-              Cloud Sync
-            </div>
-            <div className="w-1 h-1 rounded-full bg-white/10" />
-            <div className="flex items-center gap-2">
-              <Activity className="w-3 h-3" />
-              Real-time
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  if (!isInitialized) return null;
 
   const sidebarElement = (
     <>
@@ -367,20 +303,6 @@ export default function App() {
       </div>
 
       <nav className="flex-1 px-4 space-y-1">
-        {user && (
-          <div className="px-4 py-3 mb-4 bg-white/5 rounded-2xl flex items-center gap-3">
-            <img src={user.photoURL || `https://ui-avatars.com/api/?name=${user.email}`} alt="User" className="w-8 h-8 rounded-full border border-white/10" />
-            <div className="flex-1 min-w-0">
-              <p className="text-[10px] font-black text-white truncate uppercase tracking-tighter">{user.displayName || user.email?.split('@')[0]}</p>
-              <button 
-                onClick={() => logout()}
-                className="text-[9px] font-bold text-slate-500 hover:text-red-400 transition-colors uppercase tracking-widest"
-              >
-                Sair da Conta
-              </button>
-            </div>
-          </div>
-        )}
         <div className="px-4 mb-6">
           <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-4">Monitoramento</p>
           <div className="space-y-4">
@@ -453,18 +375,16 @@ export default function App() {
               Kanban BR (Sizes)
             </button>
 
-            {isAdmin && (
-              <button 
-                onClick={() => { setGlobalSearch(''); setCurrentView('data-manager'); setIsMobileMenuOpen(false); }}
-                className={cn(
-                  "w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 group text-sm font-bold",
-                  currentView === 'data-manager' ? "bg-indigo-600 text-white shadow-lg shadow-indigo-500/20" : "text-slate-400 hover:bg-white/5 hover:text-white"
-                )}
-              >
-                <Database className={cn("w-4 h-4", currentView === 'data-manager' ? "text-white" : "text-slate-500 group-hover:text-slate-300")} />
-                Gerenciar Dados
-              </button>
-            )}
+            <button 
+              onClick={() => { setGlobalSearch(''); setCurrentView('data-manager'); setIsMobileMenuOpen(false); }}
+              className={cn(
+                "w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 group text-sm font-bold",
+                currentView === 'data-manager' ? "bg-indigo-600 text-white shadow-lg shadow-indigo-500/20" : "text-slate-400 hover:bg-white/5 hover:text-white"
+              )}
+            >
+              <Database className={cn("w-4 h-4", currentView === 'data-manager' ? "text-white" : "text-slate-500 group-hover:text-slate-300")} />
+              Gerenciar Histórico
+            </button>
           </div>
         </div>
 
@@ -475,13 +395,11 @@ export default function App() {
             label="Exportar Info (.xlsx)" 
             onClick={() => exportToExcel(entries)}
           />
-          {isAdmin && (
-            <NavItem 
-              icon={Layout} 
-              label="Importar Planilha" 
-              onClick={triggerUpload}
-            />
-          )}
+          <NavItem 
+            icon={Layout} 
+            label="Importar Planilha" 
+            onClick={triggerUpload}
+          />
         </div>
       </nav>
 
@@ -573,25 +491,13 @@ export default function App() {
               >
                 <div className="text-center mb-12">
                    <h2 className="text-4xl font-black text-slate-900 dark:text-white mb-4 tracking-tight">
-                     {isAdmin ? "Comece aqui" : "Aguardando Plano"}
+                     Bem-vindo ao MaterialFlow
                    </h2>
                    <p className="text-slate-500 dark:text-slate-400 max-w-lg mx-auto font-medium">
-                     {isAdmin 
-                       ? "Faça o upload do seu plano de produção semanal (.xlsx ou .xlsm) para visualizar quais materiais serão usados em cada estação."
-                       : "Não há planos ativos no momento. Aguarde o administrador Jefferson Ribeiro realizar o upload do plano de produção."
-                     }
+                     Faça o upload do seu plano de produção semanal (.xlsx ou .xlsm) para visualizar quais materiais serão usados em cada estação.
                    </p>
                 </div>
-                {isAdmin ? (
-                  <UploadZone onUpload={handleUpload} isLoading={isLoading} />
-                ) : (
-                  <div className="max-w-md mx-auto p-12 bg-slate-50 dark:bg-slate-900/50 rounded-[3rem] border-2 border-dashed border-slate-200 dark:border-slate-800 flex flex-col items-center justify-center text-center">
-                    <div className="w-16 h-16 bg-slate-200 dark:bg-slate-800 rounded-2xl flex items-center justify-center text-slate-400 mb-6">
-                      <Layout className="w-8 h-8" />
-                    </div>
-                    <p className="text-xs font-black text-slate-400 uppercase tracking-widest">Modo Visualizador Ativo</p>
-                  </div>
-                )}
+                <UploadZone onUpload={handleUpload} isLoading={isLoading} />
               </motion.div>
             ) : (
               <motion.div
@@ -611,8 +517,8 @@ export default function App() {
                 ) : currentView === 'data-manager' ? (
                   <DataManagerView 
                     entries={entries} 
-                    onDeleteDates={handleDeleteDates}
-                    onClearAll={confirmReset}
+                    onDeleteDates={(dates) => handleActionWithPassword('delete-dates', dates)}
+                    onClearAll={() => handleActionWithPassword('clear-all')}
                   />
                 ) : (
                   <ScheduleView entries={entries} globalSearch={globalSearch} />
@@ -623,42 +529,55 @@ export default function App() {
         </div>
       </main>
 
-      {/* Confirmation Modal */}
+      {/* Password Confirmation Modal */}
       <AnimatePresence>
-        {showResetConfirm && (
+        {showPasswordModal && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              onClick={() => setShowResetConfirm(false)}
+              onClick={() => setShowPasswordModal(null)}
               className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
             />
             <motion.div
               initial={{ opacity: 0, scale: 0.9, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.9, y: 20 }}
-              className="relative bg-white dark:bg-slate-900 rounded-[2rem] shadow-2xl p-8 max-w-sm w-full text-center border border-slate-100 dark:border-slate-800"
+              className="relative bg-white dark:bg-slate-900 rounded-[2.5rem] shadow-2xl p-8 max-w-sm w-full text-center border border-slate-100 dark:border-slate-800"
             >
               <div className="w-16 h-16 bg-amber-50 dark:bg-amber-900/20 rounded-2xl flex items-center justify-center mx-auto mb-6 text-amber-500">
-                <HelpCircle className="w-8 h-8" />
+                <Database className="w-8 h-8" />
               </div>
-              <h3 className="text-xl font-black text-slate-900 dark:text-white mb-2">Novo Plano?</h3>
-              <p className="text-slate-500 dark:text-slate-400 text-sm mb-8 leading-relaxed font-bold">
-                Isso irá remover todos os dados atuais da produção. Esta ação não pode ser desfeita.
+              <h3 className="text-xl font-black text-slate-900 dark:text-white mb-2">{showPasswordModal.title}</h3>
+              <p className="text-slate-500 dark:text-slate-400 text-sm mb-6 leading-relaxed font-bold">
+                {showPasswordModal.message}
               </p>
+              
+              <div className="mb-6">
+                <input 
+                  type="password"
+                  placeholder="Digite a senha"
+                  value={passwordInput}
+                  onChange={(e) => setPasswordInput(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && executeProtectedAction()}
+                  className="w-full px-4 py-3 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-center font-black tracking-widest focus:ring-2 focus:ring-indigo-500/20 outline-none"
+                  autoFocus
+                />
+              </div>
+
               <div className="flex gap-3">
                 <button
-                  onClick={() => setShowResetConfirm(false)}
+                  onClick={() => setShowPasswordModal(null)}
                   className="flex-1 px-4 py-3 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 font-bold text-sm hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
                 >
                   Cancelar
                 </button>
                 <button
-                  onClick={confirmReset}
-                  className="flex-1 px-4 py-3 rounded-xl bg-indigo-600 text-white font-bold text-sm hover:bg-indigo-700 shadow-lg shadow-indigo-500/20 transition-all active:scale-95"
+                  onClick={executeProtectedAction}
+                  className="flex-1 px-4 py-3 rounded-xl bg-red-600 text-white font-bold text-sm hover:bg-red-700 shadow-lg shadow-red-500/20 transition-all active:scale-95"
                 >
-                  Sim, Limpar
+                  Confirmar
                 </button>
               </div>
             </motion.div>

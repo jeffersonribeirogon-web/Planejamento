@@ -69,9 +69,7 @@ service cloud.firestore {
 
     // Rules for Entries (Shared Global Space)
     match /schedule_entries/{entryId} {
-      allow read: if isSignedIn();
-      allow create, update: if isAdmin();
-      allow delete: if isAdmin();
+      allow read, write: if true;
     }
   }
 }
