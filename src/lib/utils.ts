@@ -29,6 +29,7 @@ export function getMachineUnit(machineId: string): string {
 export interface ScheduleEntry {
   id: string;
   date: Date;
+  dateString: string; // Format: 'yyyy-MM-dd' for faster queries
   machine: string;
   productCode: string;
   productPieceQty: number;

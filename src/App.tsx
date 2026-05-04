@@ -20,9 +20,27 @@ import { Box } from 'lucide-react';
 import { format, subDays, startOfDay, isBefore } from 'date-fns';
 import { DataManagerView } from './components/DataManagerView';
 
+import { auth, loginWithGoogle, logout, db, handleFirestoreError, OperationType } from './lib/firebase';
+import { onAuthStateChanged, User } from 'firebase/auth';
+import { 
+  collection, 
+  query, 
+  onSnapshot, 
+  setDoc, 
+  doc, 
+  deleteDoc, 
+  writeBatch,
+  serverTimestamp,
+  getDocs,
+  where
+} from 'firebase/firestore';
+
 export default function App() {
+  const [user, setUser] = useState<User | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
   const [entries, setEntries] = useState<ScheduleEntry[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isInitializingAuth, setIsInitializingAuth] = useState(true);
   const [isInitialized, setIsInitialized] = useState(false);
   const [globalSearch, setGlobalSearch] = useState('');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -35,30 +53,76 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    const saved = localStorage.getItem('materialflow_entries');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        const thirtyDaysAgo = startOfDay(subDays(new Date(), 30));
-        
-        const hydratedAndFiltered = parsed.map((e: any) => ({
-          ...e,
-          date: new Date(e.date)
-        })).filter((e: any) => !isBefore(e.date, thirtyDaysAgo));
-        
-        setEntries(hydratedAndFiltered);
-      } catch (e) {
-        console.error("Failed to load saved data", e);
-      }
-    }
-    setIsInitialized(true);
-  }, []);
+    let unsubscribeEntries: (() => void) | null = null;
 
-  useEffect(() => {
-    if (isInitialized) {
-      localStorage.setItem('materialflow_entries', JSON.stringify(entries));
-    }
-  }, [entries, isInitialized]);
+    const unsubscribeAuth = onAuthStateChanged(auth, async (currentUser) => {
+      // Step 1: Cleanup previous Firestore listener if it exists
+      if (unsubscribeEntries) {
+        unsubscribeEntries();
+        unsubscribeEntries = null;
+      }
+
+      setUser(currentUser);
+      const adminEmail = 'jefferson.ribeiro.gon@gmail.com';
+      setIsAdmin(currentUser?.email?.toLowerCase() === adminEmail);
+      setIsInitializingAuth(false);
+      
+      if (currentUser) {
+        // Sync User Profile
+        try {
+          const userDocRef = doc(db, 'users', currentUser.uid);
+          await setDoc(userDocRef, {
+            userId: currentUser.uid,
+            email: currentUser.email,
+            displayName: currentUser.displayName,
+            photoURL: currentUser.photoURL,
+            createdAt: serverTimestamp()
+          }, { merge: true });
+        } catch (error) {
+          console.error("Error updating user profile:", error);
+        }
+
+        // Load Global Entries from Firestore (Shared path) - Filter to 30 days
+        const entriesRef = collection(db, 'schedule_entries');
+        const thirtyDaysAgo = startOfDay(subDays(new Date(), 30));
+        const thirtyDaysAgoStr = format(thirtyDaysAgo, 'yyyy-MM-dd');
+        
+        const q = query(entriesRef, where('dateString', '>=', thirtyDaysAgoStr));
+        
+        unsubscribeEntries = onSnapshot(q, (snapshot) => {
+          const loadedEntries: ScheduleEntry[] = [];
+          
+          snapshot.forEach((doc) => {
+            const data = doc.data();
+            const date = new Date(data.date);
+            
+            loadedEntries.push({
+              ...data,
+              date: date
+            } as ScheduleEntry);
+          });
+          
+          setEntries(loadedEntries);
+          setIsInitialized(true);
+          setIsLoading(false);
+        }, (error) => {
+          // Only report if we still have a user (prevents race condition errors on logout)
+          if (auth.currentUser) {
+            handleFirestoreError(error, OperationType.LIST, `schedule_entries`);
+          }
+        });
+      } else {
+        setEntries([]);
+        setIsInitialized(true);
+        setIsLoading(false);
+      }
+    });
+
+    return () => {
+      unsubscribeAuth();
+      if (unsubscribeEntries) unsubscribeEntries();
+    };
+  }, []);
 
   useEffect(() => {
     localStorage.setItem('theme', isDark ? 'dark' : 'light');
@@ -72,18 +136,62 @@ export default function App() {
   const toggleTheme = () => setIsDark(!isDark);
 
   const handleUpload = async (file: File) => {
+    if (!user || !isAdmin) {
+      alert("Apenas administradores podem fazer upload de novos planos.");
+      return;
+    }
     setIsLoading(true);
     try {
       const parsedEntries = await parseExcelFile(file);
+      const newDatesStrings = Array.from(new Set(parsedEntries.map(e => e.dateString)));
+      const entriesRef = collection(db, 'schedule_entries');
+
+      // Helper to chunk array for batch operations
+      function chunk<T>(arr: T[], size: number): T[][] {
+        return Array.from({ length: Math.ceil(arr.length / size) }, (v, i) =>
+          arr.slice(i * size, i * size + size)
+        );
+      }
+
+      // Step 1: Selective Clearing of dates present in the file
+      // Firestore 'in' queries are limited to 30 elements
+      const dateChunks = chunk(newDatesStrings, 30);
       
-      // Merge logic: replace existing entries for the dates found in the new file
-      const newDates = new Set(parsedEntries.map(e => format(e.date, 'yyyy-MM-dd')));
-      const filteredExisting = entries.filter(e => !newDates.has(format(e.date, 'yyyy-MM-dd')));
-      
-      const merged = [...filteredExisting, ...parsedEntries];
-      setEntries(merged);
+      for (const dateChunk of dateChunks) {
+        const q = query(entriesRef, where('dateString', 'in', dateChunk));
+        const snapshot = await getDocs(q);
+        
+        if (!snapshot.empty) {
+          const docsToDelete = snapshot.docs;
+          const deleteChunks = chunk(docsToDelete, 500);
+          
+          for (const delChunk of deleteChunks) {
+            const batch = writeBatch(db);
+            delChunk.forEach(docSnap => batch.delete(docSnap.ref));
+            await batch.commit();
+          }
+        }
+      }
+
+      // Step 2: Batch write new entries
+      const writeChunks = chunk(parsedEntries, 500);
+      for (const wChunk of writeChunks) {
+        const batch = writeBatch(db);
+        wChunk.forEach(entry => {
+          const entryDocRef = doc(db, 'schedule_entries', entry.id);
+          batch.set(entryDocRef, {
+            ...entry,
+            userId: user.uid,
+            date: entry.date.toISOString(),
+            serverTimestamp: serverTimestamp()
+          });
+        });
+        await batch.commit();
+      }
+
       setCurrentView('schedule');
     } catch (error) {
+      console.error("Upload error:", error);
       alert(error instanceof Error ? error.message : "Erro ao processar o arquivo.");
     } finally {
       setIsLoading(false);
@@ -100,21 +208,121 @@ export default function App() {
     fileInputRef.current?.click();
   };
 
-  const handleDeleteDates = (datesToDelete: string[]) => {
-    const datesSet = new Set(datesToDelete);
-    setEntries(prev => {
-      const filtered = prev.filter(e => !datesSet.has(format(e.date, 'yyyy-MM-dd')));
-      return filtered;
-    });
+  const handleDeleteDates = async (datesToDelete: string[]) => {
+    if (!user || !isAdmin) return;
+    
+    // Helper to chunk array
+    function chunk<T>(arr: T[], size: number): T[][] {
+      return Array.from({ length: Math.ceil(arr.length / size) }, (v, i) =>
+        arr.slice(i * size, i * size + size)
+      );
+    }
+
+    try {
+      const entriesRef = collection(db, 'schedule_entries');
+      const dateChunks = chunk(datesToDelete, 30);
+      
+      for (const dateChunk of dateChunks) {
+        const q = query(entriesRef, where('dateString', 'in', dateChunk));
+        const snapshot = await getDocs(q);
+        
+        if (!snapshot.empty) {
+          const deleteChunks = chunk(snapshot.docs, 500);
+          for (const delChunk of deleteChunks) {
+            const batch = writeBatch(db);
+            delChunk.forEach(docSnap => batch.delete(docSnap.ref));
+            await batch.commit();
+          }
+        }
+      }
+    } catch (error) {
+      console.error("Error deleting dates:", error);
+      alert("Erro ao excluir dados.");
+    }
   };
 
-  const confirmReset = () => {
-    setEntries([]);
-    setGlobalSearch('');
-    setIsMobileMenuOpen(false);
-    setShowResetConfirm(false);
-    setCurrentView('schedule');
+  const confirmReset = async () => {
+    if (!user || !isAdmin) return;
+    setIsLoading(true);
+    try {
+      const entriesRef = collection(db, 'schedule_entries');
+      const snapshot = await getDocs(entriesRef);
+      
+      function chunk<T>(arr: T[], size: number): T[][] {
+        return Array.from({ length: Math.ceil(arr.length / size) }, (v, i) =>
+          arr.slice(i * size, i * size + size)
+        );
+      }
+
+      if (!snapshot.empty) {
+        const deleteChunks = chunk(snapshot.docs, 500);
+        for (const delChunk of deleteChunks) {
+          const batch = writeBatch(db);
+          delChunk.forEach(docSnap => batch.delete(docSnap.ref));
+          await batch.commit();
+        }
+      }
+      
+      setGlobalSearch('');
+      setIsMobileMenuOpen(false);
+      setShowResetConfirm(false);
+      setCurrentView('schedule');
+    } catch (error) {
+      console.error("Error clearing all data:", error);
+      alert("Erro ao limpar dados.");
+    } finally {
+      setIsLoading(false);
+    }
   };
+
+  if (isInitializingAuth) {
+    return (
+      <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center p-8">
+        <div className="w-16 h-16 border-4 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin mb-8" />
+        <p className="text-white font-black uppercase tracking-widest text-xs animate-pulse">Sincronizando Dados...</p>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="min-h-screen bg-slate-900 dark:bg-slate-950 flex flex-col items-center justify-center p-8">
+        <div className="max-w-md w-full text-center">
+          <div className="w-20 h-20 bg-indigo-600 rounded-[2rem] flex items-center justify-center shadow-2xl shadow-indigo-500/20 text-white mx-auto mb-8">
+            <Activity className="w-10 h-10" />
+          </div>
+          <h1 className="text-3xl font-black text-white mb-4 tracking-tight uppercase">MaterialFlow</h1>
+          <p className="text-slate-400 font-bold mb-12 text-sm leading-relaxed">
+            Seu planejamento sincronizado em todos os dispositivos. Faça login para acessar seus dados.
+          </p>
+          <button 
+            onClick={() => loginWithGoogle()}
+            className="w-full flex items-center justify-center gap-4 py-4 bg-white text-slate-900 rounded-2xl font-black text-sm uppercase tracking-widest hover:bg-slate-50 transition-all shadow-xl active:scale-[0.98]"
+          >
+            <svg className="w-5 h-5" viewBox="0 0 24 24">
+              <path fill="currentColor" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+              <path fill="currentColor" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+              <path fill="currentColor" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" />
+              <path fill="currentColor" d="M12 5.38c1.62 0 3.06.56 4.21 1.66l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
+            </svg>
+            Entrar com Google
+          </button>
+          
+          <div className="mt-12 pt-12 border-t border-white/5 flex items-center justify-center gap-4 text-slate-500 font-bold text-[10px] uppercase tracking-widest">
+            <div className="flex items-center gap-2">
+              <Database className="w-3 h-3" />
+              Cloud Sync
+            </div>
+            <div className="w-1 h-1 rounded-full bg-white/10" />
+            <div className="flex items-center gap-2">
+              <Activity className="w-3 h-3" />
+              Real-time
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (!isInitialized) return null;
 
@@ -133,6 +341,20 @@ export default function App() {
       </div>
 
       <nav className="flex-1 px-4 space-y-1">
+        {user && (
+          <div className="px-4 py-3 mb-4 bg-white/5 rounded-2xl flex items-center gap-3">
+            <img src={user.photoURL || `https://ui-avatars.com/api/?name=${user.email}`} alt="User" className="w-8 h-8 rounded-full border border-white/10" />
+            <div className="flex-1 min-w-0">
+              <p className="text-[10px] font-black text-white truncate uppercase tracking-tighter">{user.displayName || user.email?.split('@')[0]}</p>
+              <button 
+                onClick={() => logout()}
+                className="text-[9px] font-bold text-slate-500 hover:text-red-400 transition-colors uppercase tracking-widest"
+              >
+                Sair da Conta
+              </button>
+            </div>
+          </div>
+        )}
         <div className="px-4 mb-6">
           <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-4">Monitoramento</p>
           <div className="space-y-4">
@@ -205,16 +427,18 @@ export default function App() {
               Kanban BR (Sizes)
             </button>
 
-            <button 
-              onClick={() => { setGlobalSearch(''); setCurrentView('data-manager'); setIsMobileMenuOpen(false); }}
-              className={cn(
-                "w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 group text-sm font-bold",
-                currentView === 'data-manager' ? "bg-indigo-600 text-white shadow-lg shadow-indigo-500/20" : "text-slate-400 hover:bg-white/5 hover:text-white"
-              )}
-            >
-              <Database className={cn("w-4 h-4", currentView === 'data-manager' ? "text-white" : "text-slate-500 group-hover:text-slate-300")} />
-              Gerenciar Dados
-            </button>
+            {isAdmin && (
+              <button 
+                onClick={() => { setGlobalSearch(''); setCurrentView('data-manager'); setIsMobileMenuOpen(false); }}
+                className={cn(
+                  "w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 group text-sm font-bold",
+                  currentView === 'data-manager' ? "bg-indigo-600 text-white shadow-lg shadow-indigo-500/20" : "text-slate-400 hover:bg-white/5 hover:text-white"
+                )}
+              >
+                <Database className={cn("w-4 h-4", currentView === 'data-manager' ? "text-white" : "text-slate-500 group-hover:text-slate-300")} />
+                Gerenciar Dados
+              </button>
+            )}
           </div>
         </div>
 
@@ -225,11 +449,13 @@ export default function App() {
             label="Exportar Info (.xlsx)" 
             onClick={() => exportToExcel(entries)}
           />
-          <NavItem 
-            icon={Layout} 
-            label="Importar Planilha" 
-            onClick={triggerUpload}
-          />
+          {isAdmin && (
+            <NavItem 
+              icon={Layout} 
+              label="Importar Planilha" 
+              onClick={triggerUpload}
+            />
+          )}
         </div>
       </nav>
 
@@ -320,12 +546,26 @@ export default function App() {
                 className="py-12"
               >
                 <div className="text-center mb-12">
-                   <h2 className="text-4xl font-black text-slate-900 dark:text-white mb-4 tracking-tight">Comece aqui</h2>
+                   <h2 className="text-4xl font-black text-slate-900 dark:text-white mb-4 tracking-tight">
+                     {isAdmin ? "Comece aqui" : "Aguardando Plano"}
+                   </h2>
                    <p className="text-slate-500 dark:text-slate-400 max-w-lg mx-auto font-medium">
-                     Faça o upload do seu plano de produção semanal (.xlsx ou .xlsm) para visualizar quais materiais serão usados em cada estação.
+                     {isAdmin 
+                       ? "Faça o upload do seu plano de produção semanal (.xlsx ou .xlsm) para visualizar quais materiais serão usados em cada estação."
+                       : "Não há planos ativos no momento. Aguarde o administrador Jefferson Ribeiro realizar o upload do plano de produção."
+                     }
                    </p>
                 </div>
-                <UploadZone onUpload={handleUpload} isLoading={isLoading} />
+                {isAdmin ? (
+                  <UploadZone onUpload={handleUpload} isLoading={isLoading} />
+                ) : (
+                  <div className="max-w-md mx-auto p-12 bg-slate-50 dark:bg-slate-900/50 rounded-[3rem] border-2 border-dashed border-slate-200 dark:border-slate-800 flex flex-col items-center justify-center text-center">
+                    <div className="w-16 h-16 bg-slate-200 dark:bg-slate-800 rounded-2xl flex items-center justify-center text-slate-400 mb-6">
+                      <Layout className="w-8 h-8" />
+                    </div>
+                    <p className="text-xs font-black text-slate-400 uppercase tracking-widest">Modo Visualizador Ativo</p>
+                  </div>
+                )}
               </motion.div>
             ) : (
               <motion.div

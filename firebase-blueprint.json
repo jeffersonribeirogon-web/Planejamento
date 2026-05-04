@@ -1,0 +1,48 @@
+{
+  "entities": {
+    "ScheduleEntry": {
+      "title": "Schedule Entry",
+      "description": "A single material requirement for a machine on a specific date",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" },
+        "dateString": { "type": "string" },
+        "machine": { "type": "string" },
+        "productCode": { "type": "string" },
+        "productPieceQty": { "type": "number" },
+        "material": { "type": "string" },
+        "materialClass": { "type": "string" },
+        "quantity": { "type": "string" },
+        "unit": { "type": "string" },
+        "note": { "type": "string" },
+        "serverTimestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "date", "machine", "productCode", "material", "quantity"]
+    },
+    "UserProfile": {
+      "title": "User Profile",
+      "description": "Basic information about the user",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "email"]
+    }
+  },
+  "firestore": {
+    "users/{userId}": {
+      "schema": "UserProfile",
+      "description": "Storage for user profile data"
+    },
+    "schedule_entries/{entryId}": {
+      "schema": "ScheduleEntry",
+      "description": "Global shared schedule entries"
+    }
+  }
+}
