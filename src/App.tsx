@@ -307,9 +307,13 @@ export default function App() {
                 if (error.code === 'auth/popup-blocked') {
                   alert("O bloqueador de pop-ups impediu o login. Por favor, autorize pop-ups para este site.");
                 } else if (error.code === 'auth/cancelled-popup-request' || error.code === 'auth/popup-closed-by-user') {
-                  // User closed or cancelled, no need for alert
+                  // User closed or cancelled
+                  // If it closed immediately, it might be a domain issue
+                  console.warn("Popup closed or cancelled. If this happened immediately, check if the domain is authorized in Firebase Console.");
+                } else if (error.code === 'auth/unauthorized-domain') {
+                  alert("Este domínio não está autorizado no Firebase Console. Adicione seu domínio Vercel na aba 'Authorized Domains' no console do Firebase.");
                 } else {
-                  alert("Erro ao fazer login: " + (error.message || "Tente novamente."));
+                  alert("Erro ao fazer login: " + (error.message || "Tente novamente. Verifique se o domínio está autorizado no Firebase Authentication."));
                 }
               } finally {
                 setIsLoggingIn(false);
