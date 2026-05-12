@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, useEffect } from 'react';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, 
   PieChart, Pie, Cell, LineChart, Line, Legend 
@@ -28,19 +28,36 @@ interface DashboardViewProps {
 const COLORS = ['#6366f1', '#8b5cf6', '#ec4899', '#f43f5e', '#f59e0b', '#10b981', '#06b6d4'];
 
 export function DashboardView({ entries }: DashboardViewProps) {
-  const [selectedDay, setSelectedDay] = useState<string>('all');
-
-  // Filter entries based on selected day
-  const filteredEntries = useMemo(() => {
-    if (selectedDay === 'all') return entries;
-    return entries.filter(e => format(e.date, 'yyyy-MM-dd') === selectedDay);
-  }, [entries, selectedDay]);
+  const [selectedDay, setSelectedDay] = useState<string>('');
 
   // Available days for filter
   const availableDays = useMemo(() => {
     const days = Array.from(new Set(entries.map(e => format(e.date, 'yyyy-MM-dd'))));
     return days.sort();
   }, [entries]);
+
+  // Auto-select today's date when entries are loaded
+  useEffect(() => {
+    if (entries.length > 0 && !selectedDay) {
+      const now = new Date();
+      const productionDate = now.getHours() < 6 
+        ? new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)
+        : now;
+      
+      const todayStr = format(productionDate, 'yyyy-MM-dd');
+      if (availableDays.includes(todayStr)) {
+        setSelectedDay(todayStr);
+      } else {
+        setSelectedDay('all');
+      }
+    }
+  }, [entries, availableDays, selectedDay]);
+
+  // Filter entries based on selected day
+  const filteredEntries = useMemo(() => {
+    if (selectedDay === 'all' || !selectedDay) return entries;
+    return entries.filter(e => format(e.date, 'yyyy-MM-dd') === selectedDay);
+  }, [entries, selectedDay]);
 
   // Alerts: Sizes starting within 36 hours
   const upcomingAlerts = useMemo(() => {
@@ -53,12 +70,14 @@ export function DashboardView({ entries }: DashboardViewProps) {
       return entryTime >= now.getTime() && entryTime <= thirtySixHoursFromNow.getTime();
     });
 
-    const products = new Map<string, { machine: string, date: Date, materials: Set<string> }>();
+    const products = new Map<string, { machine: string, date: Date, materials: Set<string>, pieceQty: number }>();
     upcoming.forEach(e => {
       if (!products.has(e.productCode)) {
-        products.set(e.productCode, { machine: e.machine, date: e.date, materials: new Set() });
+        products.set(e.productCode, { machine: e.machine, date: e.date, materials: new Set(), pieceQty: 0 });
       }
-      products.get(e.productCode)!.materials.add(e.material);
+      const data = products.get(e.productCode)!;
+      data.materials.add(e.material);
+      data.pieceQty += (e.productPieceQty || 0);
     });
 
     return Array.from(products.entries()).map(([productCode, info]) => ({
@@ -149,7 +168,10 @@ export function DashboardView({ entries }: DashboardViewProps) {
                     </div>
                     <div>
                       <p className="text-[10px] font-black text-amber-600/70 uppercase tracking-widest leading-none mb-1">Entra em linha</p>
-                      <h4 className="text-sm font-black text-slate-900 dark:text-white uppercase tracking-tight">{alert.productCode}</h4>
+                      <h4 className="text-sm font-black text-slate-900 dark:text-white uppercase tracking-tight">
+                        {alert.productCode} 
+                        {alert.pieceQty > 0 && <span className="ml-2 text-[10px] text-amber-600/70 font-black">({alert.pieceQty} pçs)</span>}
+                      </h4>
                       <div className="flex flex-wrap gap-1 mt-1.5">
                         {alert.materials.map(mat => (
                           <span key={mat} className="text-[8px] font-black bg-white/50 dark:bg-black/20 px-1.5 py-0.5 rounded border border-amber-200/50 dark:border-amber-900/30 text-slate-500 uppercase">

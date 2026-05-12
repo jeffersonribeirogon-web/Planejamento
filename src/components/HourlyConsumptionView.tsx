@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, useEffect } from 'react';
 import { ScheduleEntry, getMachineUnit } from '../lib/utils';
 import { format, startOfDay } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
@@ -24,17 +24,25 @@ export function HourlyConsumptionView({ entries }: HourlyConsumptionViewProps) {
   }, [entries]);
 
   // Default to current production date or first available
-  const [selectedDate, setSelectedDate] = useState<string>(() => {
-    const now = new Date();
-    // 06:00 production shift logic
-    const productionDate = now.getHours() < 6 
-      ? new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)
-      : now;
-    
-    const todayStr = format(productionDate, 'yyyy-MM-dd');
-    if (availableDates.includes(todayStr)) return todayStr;
-    return availableDates[0] || '';
-  });
+  const [selectedDate, setSelectedDate] = useState<string>('');
+
+  // Auto-select today's date when entries are loaded
+  useEffect(() => {
+    if (entries.length > 0 && !selectedDate) {
+      const now = new Date();
+      // 06:00 production shift logic
+      const productionDate = now.getHours() < 6 
+        ? new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)
+        : now;
+      
+      const todayStr = format(productionDate, 'yyyy-MM-dd');
+      if (availableDates.includes(todayStr)) {
+        setSelectedDate(todayStr);
+      } else if (availableDates.length > 0) {
+        setSelectedDate(availableDates[0]);
+      }
+    }
+  }, [entries, availableDates, selectedDate]);
 
   // Calculate consumption rate per machine and product code
   const machineProductRates = useMemo(() => {

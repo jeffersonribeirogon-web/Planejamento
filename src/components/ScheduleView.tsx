@@ -19,6 +19,7 @@ interface ConsolidatedMaterial {
 
 interface ProductGroup {
   productCode: string;
+  pieceQty: number;
   materials: ConsolidatedMaterial[];
 }
 
@@ -37,31 +38,33 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({ entries, globalSearc
     return uniqueDates.sort((a, b) => a.localeCompare(b));
   }, [entries]);
 
-  const [selectedDate, setSelectedDate] = useState<string>(() => {
-    const now = new Date();
-    // Shift starts at 06:00. If current hour is < 6, we are on the previous day's production schedule.
-    const productionDate = now.getHours() < 6 
-      ? new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)
-      : now;
-    
-    const todayStr = format(productionDate, 'yyyy-MM-dd');
-    
-    // Check if today exists in the uploaded data
-    const rawDates = entries.map(e => format(e.date, 'yyyy-MM-dd'));
-    if (rawDates.includes(todayStr)) {
-      return todayStr;
+  const [selectedDate, setSelectedDate] = useState<string>('');
+
+  // Auto-select today's date when entries are loaded
+  React.useEffect(() => {
+    if (entries.length > 0 && !selectedDate) {
+      const now = new Date();
+      // Shift starts at 06:00. If current hour is < 6, we are on the previous day's production schedule.
+      const productionDate = now.getHours() < 6 
+        ? new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)
+        : now;
+      
+      const todayStr = format(productionDate, 'yyyy-MM-dd');
+      
+      if (availableDates.includes(todayStr)) {
+        setSelectedDate(todayStr);
+      } else if (availableDates.length > 0) {
+        // Fallback to first available date
+        setSelectedDate(availableDates[0]);
+      }
     }
-    
-    // Fallback to first available date or empty
-    const uniqueDates = Array.from(new Set(rawDates)).sort() as string[];
-    return uniqueDates[0] || '';
-  });
+  }, [entries, availableDates, selectedDate]);
 
   // Tracing view logic: List all Machine + Size for a specific material across ALL dates
   const tracedResults = useMemo(() => {
     if (!globalSearch) return [];
     
-    const results: Array<{ date: Date, machine: string, productCode: string, qty: number }> = [];
+    const results: Array<{ date: Date, machine: string, productCode: string, qty: number, pieceQty: number }> = [];
     entries.forEach(e => {
         const productCode = e.productCode || '';
         const material = e.material || '';
@@ -72,7 +75,8 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({ entries, globalSearc
                 date: e.date,
                 machine: e.machine,
                 productCode: e.productCode,
-                qty: parseFloat(e.quantity)
+                qty: parseFloat(e.quantity),
+                pieceQty: e.productPieceQty || 0
             });
         }
     });
@@ -87,7 +91,12 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({ entries, globalSearc
 
   // Consolidated logic: Group by Machine -> then by ProductCode
   const machineGroups = useMemo(() => {
-    const groups: Record<string, Record<string, Record<string, ConsolidatedMaterial>>> = {};
+    const groups: Record<string, {
+      products: Record<string, {
+        materials: Record<string, ConsolidatedMaterial>,
+        pieceQty: number
+      }>
+    }> = {};
 
     entries.forEach(e => {
         const dateStr = format(e.date, 'yyyy-MM-dd');
@@ -95,17 +104,23 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({ entries, globalSearc
         
         if (selectedMachine !== 'all' && e.machine !== selectedMachine) return;
         
-        if (!groups[e.machine]) groups[e.machine] = {};
-        if (!groups[e.machine][e.productCode]) groups[e.machine][e.productCode] = {};
+        if (!groups[e.machine]) groups[e.machine] = { products: {} };
+        if (!groups[e.machine].products[e.productCode]) {
+          groups[e.machine].products[e.productCode] = {
+            materials: {},
+            pieceQty: e.productPieceQty || 0
+          };
+        }
         
         const qty = parseFloat(e.quantity) || 0;
+        const targetProduct = groups[e.machine].products[e.productCode];
         
-        if (groups[e.machine][e.productCode][e.material]) {
-            const newTotal = groups[e.machine][e.productCode][e.material].totalQuantity + qty;
+        if (targetProduct.materials[e.material]) {
+            const newTotal = targetProduct.materials[e.material].totalQuantity + qty;
             // Round to 4 decimal places to clean up floating point addition noise
-            groups[e.machine][e.productCode][e.material].totalQuantity = Math.round(newTotal * 10000) / 10000;
+            targetProduct.materials[e.material].totalQuantity = Math.round(newTotal * 10000) / 10000;
         } else {
-            groups[e.machine][e.productCode][e.material] = {
+            targetProduct.materials[e.material] = {
                 material: e.material,
                 materialClass: e.materialClass,
                 totalQuantity: Math.round(qty * 10000) / 10000,
@@ -114,10 +129,11 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({ entries, globalSearc
         }
     });
 
-    const finalGroups: MachineGroup[] = Object.entries(groups).map(([machineName, productsMap]) => {
-      const products: ProductGroup[] = Object.entries(productsMap).map(([productCode, materialsMap]) => ({
+    const finalGroups: MachineGroup[] = Object.entries(groups).map(([machineName, data]) => {
+      const products: ProductGroup[] = Object.entries(data.products).map(([productCode, prodData]) => ({
         productCode,
-        materials: Object.values(materialsMap)
+        pieceQty: prodData.pieceQty,
+        materials: Object.values(prodData.materials)
       }));
 
       return {
@@ -199,7 +215,7 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({ entries, globalSearc
                            </td>
                            <td className="px-4 py-5">
                               <span className="px-3 py-1 bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-400 rounded-full text-[10px] font-black uppercase border border-amber-100 dark:border-amber-900/50 whitespace-nowrap">
-                                 Size {res.productCode}
+                                 Size {res.productCode} {res.pieceQty > 0 && <span className="opacity-60 ml-1">({res.pieceQty} pçs)</span>}
                               </span>
                            </td>
                            <td className="px-6 py-5 text-right">
@@ -305,12 +321,17 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({ entries, globalSearc
                         <div className="text-[10px] font-black text-white/50 uppercase tracking-widest leading-none mb-1">
                           {getMachineUnit(group.machineName)}
                         </div>
-                        <h3 className="font-black text-lg tracking-tight uppercase">
-                           Máq #{group.machineName}
-                           {!group.hasMultipleProducts && (
-                             <span className="ml-2 font-normal text-white/70">Size {group.products[0]?.productCode}</span>
-                           )}
-                        </h3>
+                         <h3 className="font-black text-lg tracking-tight uppercase">
+                            Máq #{group.machineName}
+                            {!group.hasMultipleProducts && (
+                              <span className="ml-2 font-normal text-white/70">
+                                Size {group.products[0]?.productCode}
+                                {group.products[0]?.pieceQty > 0 && (
+                                  <span className="ml-1 opacity-60 text-xs">({group.products[0].pieceQty} pçs)</span>
+                                )}
+                              </span>
+                            )}
+                         </h3>
                         <div className="flex items-center gap-2 text-[10px] text-white/60 font-bold uppercase tracking-widest">
                           {group.hasMultipleProducts ? (
                             <span className="text-amber-100 italic font-black">Múltiplos modelos (Sizes) detectados</span>
@@ -328,7 +349,12 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({ entries, globalSearc
                       <div key={product.productCode} className="flex flex-col">
                         {group.hasMultipleProducts && (
                           <div className="bg-slate-50 dark:bg-slate-800/40 px-6 py-2.5 flex items-center justify-between border-y border-slate-100 dark:border-slate-800">
-                            <span className="text-[10px] font-black text-slate-500 dark:text-slate-400 uppercase tracking-widest">Size: {product.productCode}</span>
+                            <div className="flex items-center gap-2">
+                              <span className="text-[10px] font-black text-slate-500 dark:text-slate-400 uppercase tracking-widest">Size: {product.productCode}</span>
+                              {product.pieceQty > 0 && (
+                                <span className="bg-slate-200 dark:bg-slate-700 px-1.5 py-0.5 rounded text-[9px] font-black text-slate-600 dark:text-slate-400 uppercase">{product.pieceQty} pçs</span>
+                              )}
+                            </div>
                             <span className="text-[10px] font-bold text-slate-400">{product.materials.length} itens</span>
                           </div>
                         )}
