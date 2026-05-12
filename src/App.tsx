@@ -165,16 +165,18 @@ export default function App() {
       const parsedEntries = await parseExcelFile(file);
       
       const batch = writeBatch(db);
+      const entriesRef = collection(db, 'users', user.uid, 'entries');
+      let snapshot;
+      
+      try {
+        snapshot = await getDocs(entriesRef);
+      } catch (error) {
+        handleFirestoreError(error, OperationType.LIST, `users/${user.uid}/entries`);
+        return;
+      }
       
       // Step 1: Identify existing dates in the new file to clear them (like local logic)
       const newDates = new Set(parsedEntries.map(e => format(e.date, 'yyyy-MM-dd')));
-      
-      // Optimization: Instead of clearing entire subcollection (which is hard in Firestore without cloud functions),
-      // we'll just upsert new ones and let the user manage/clear dates if needed.
-      // But to match previous behavior: we should find entries with these dates and delete them.
-      
-      const entriesRef = collection(db, 'users', user.uid, 'entries');
-      const snapshot = await getDocs(entriesRef);
       
       snapshot.forEach(docSnap => {
         const data = docSnap.data();
@@ -194,10 +196,21 @@ export default function App() {
         });
       });
       
-      await batch.commit();
+      try {
+        await batch.commit();
+      } catch (error) {
+        handleFirestoreError(error, OperationType.WRITE, `users/${user.uid}/entries`);
+        return;
+      }
+      
       setCurrentView('schedule');
     } catch (error) {
-      alert(error instanceof Error ? error.message : "Erro ao processar o arquivo.");
+      console.error("Upload Error:", error);
+      if (error instanceof Error && error.message.startsWith('{')) {
+        // Already handled by handleFirestoreError
+      } else {
+        alert(error instanceof Error ? error.message : "Erro ao processar o arquivo.");
+      }
     } finally {
       setIsLoading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -364,7 +377,7 @@ export default function App() {
         </div>
       </div>
 
-      <nav className="flex-1 px-4 space-y-1">
+      <nav className="flex-1 px-4 space-y-1 overflow-y-auto custom-scrollbar pb-8">
         {user && (
           <div className="px-4 py-3 mb-4 bg-white/5 rounded-2xl flex items-center gap-3">
             <img src={user.photoURL || `https://ui-avatars.com/api/?name=${user.email}`} alt="User" className="w-8 h-8 rounded-full border border-white/10" />
