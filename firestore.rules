@@ -27,6 +27,11 @@ service cloud.firestore {
       return resource.data;
     }
 
+    // Allow reading connection test
+    match /test/connection {
+      allow read: if true;
+    }
+
     // 2. Validation Blueprints (The "Anti-Update-Gap")
     function isValidUserProfile(data) {
       return data.keys().hasAll(['userId', 'email']) 

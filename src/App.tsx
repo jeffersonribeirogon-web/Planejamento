@@ -10,7 +10,7 @@ import { DashboardView } from './components/DashboardView';
 import { HourlyConsumptionView } from './components/HourlyConsumptionView';
 import { parseExcelFile } from './lib/excel';
 import { ScheduleEntry } from './lib/utils';
-import { Layout, LogOut, Settings, HelpCircle, Activity, Search, LayoutDashboard, Moon, Sun, BarChart3, Timer, Gauge, Download } from 'lucide-react';
+import { Layout, LogOut, Settings, HelpCircle, Activity, Search, LayoutDashboard, Moon, Sun, BarChart3, Timer, Gauge, Download, Mail, Lock, User as UserIcon, AlertCircle } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from './lib/utils';
 import { ShiftMonitorView } from './components/ShiftMonitorView';
@@ -21,7 +21,13 @@ import { format, subDays, startOfDay, isBefore } from 'date-fns';
 import { DataManagerView } from './components/DataManagerView';
 
 import { auth, loginWithGoogle, logout, db, handleFirestoreError, OperationType, loginAnonymously } from './lib/firebase';
-import { onAuthStateChanged, User } from 'firebase/auth';
+import { 
+  onAuthStateChanged, 
+  User, 
+  signInWithEmailAndPassword, 
+  createUserWithEmailAndPassword, 
+  updateProfile 
+} from 'firebase/auth';
 import { 
   collection, 
   query, 
@@ -44,6 +50,15 @@ export default function App() {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [currentView, setCurrentView] = useState<'schedule' | 'dashboard' | 'shift-monitor' | 'hourly-consumption' | 'kanban' | 'data-manager'>('schedule');
+  
+  // Auth Form State
+  const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [displayName, setDisplayName] = useState('');
+  const [isPendingAuth, setIsPendingAuth] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+
   const [isDark, setIsDark] = useState(() => {
     const saved = localStorage.getItem('theme');
     return saved === 'dark';
@@ -51,10 +66,27 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+    // Fallback if auth state doesn't resolve in 10 seconds (e.g. total network failure)
+    const timeout = setTimeout(() => {
+      if (isInitializingAuth) {
+        console.warn("Auth initialization taking too long, possibly offline.");
+        setIsInitializingAuth(false);
+      }
+    }, 10000);
+
+    let unsubscribeEntries: (() => void) | null = null;
+
+    const unsubscribeAuth = onAuthStateChanged(auth, async (currentUser) => {
+      clearTimeout(timeout);
       setUser(currentUser);
       setIsInitializingAuth(false);
       
+      // Clear previous listener if any
+      if (unsubscribeEntries) {
+        unsubscribeEntries();
+        unsubscribeEntries = null;
+      }
+
       if (currentUser) {
         // Sync User Profile
         try {
@@ -63,20 +95,19 @@ export default function App() {
             userId: currentUser.uid,
             email: currentUser.email || `admin@materialflow.app`,
             displayName: currentUser.displayName || 'Usuário Admin',
-            photoURL: currentUser.photoURL || `https://ui-avatars.com/api/?name=Admin&background=6366f1&color=fff`,
+            photoURL: currentUser.photoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(currentUser.displayName || 'Admin')}&background=6366f1&color=fff`,
             role: currentUser.isAnonymous ? 'admin' : 'user',
             createdAt: serverTimestamp()
           }, { merge: true });
         } catch (error) {
           console.error("Error updating user profile:", error);
-          // If we can't sync profile, we might still want to try loading data
         }
 
         // Load Entries from Firestore
         const entriesRef = collection(db, 'users', currentUser.uid, 'entries');
         const q = query(entriesRef);
         
-        const unsubscribeEntries = onSnapshot(q, (snapshot) => {
+        unsubscribeEntries = onSnapshot(q, (snapshot) => {
           const loadedEntries: ScheduleEntry[] = [];
           const thirtyDaysAgo = startOfDay(subDays(new Date(), 30));
           
@@ -84,7 +115,6 @@ export default function App() {
             const data = doc.data();
             const date = new Date(data.date);
             
-            // Auto-clean old entries locally
             if (!isBefore(date, thirtyDaysAgo)) {
               loadedEntries.push({
                 ...data,
@@ -97,19 +127,17 @@ export default function App() {
           setIsInitialized(true);
           setIsLoading(false);
         }, (error) => {
-          console.error("Firestore List Error:", error);
-          // Don't crash the whole app if list fails for an anonymous user that just logged in
-          // (might be rules propagation delay)
-          if (currentUser.isAnonymous) {
-            setEntries([]);
-            setIsInitialized(true);
-            setIsLoading(false);
-          } else {
-            handleFirestoreError(error, OperationType.LIST, `users/${currentUser.uid}/entries`);
+          // If we are logged out while listener is active, it might fire with permission error
+          // We check if we still have a user
+          if (auth.currentUser) {
+            console.error("Firestore List Error:", error);
+            if (!auth.currentUser.isAnonymous) {
+              handleFirestoreError(error, OperationType.LIST, `users/${auth.currentUser.uid}/entries`);
+            }
           }
+          setIsInitialized(true);
+          setIsLoading(false);
         });
-
-        return () => unsubscribeEntries();
       } else {
         setEntries([]);
         setIsInitialized(true);
@@ -117,29 +145,61 @@ export default function App() {
       }
     });
 
-    return () => unsubscribe();
+    return () => {
+      unsubscribeAuth();
+      if (unsubscribeEntries) unsubscribeEntries();
+    };
   }, []);
 
-  // Auto-login as default user if not logged in
-  useEffect(() => {
-    if (!isInitializingAuth && !user) {
-      const autoLogin = async () => {
-        try {
-          await loginAnonymously();
-        } catch (err: any) {
-          console.error("Auto-login failed:", err);
-          // If anonymous login is disabled, we keep the user on the login screen
-          // but we already show the 'Entrar com Google' option.
-          if (err.code === 'auth/admin-restricted-operation') {
-            console.warn("DICA: Habilite o login anônimo no Console do Firebase para o login automático funcionar.");
-          }
-        }
-      };
-      autoLogin();
-    }
-  }, [isInitializingAuth, user]);
+  const handleEmailAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsPendingAuth(true);
+    setAuthError(null);
 
-  const [authError, setAuthError] = useState<string | null>(null);
+    // Convenience: If the user types a nickname like 'Mixer', turn it into an email
+    let finalEmail = email.trim();
+    if (finalEmail && !finalEmail.includes('@')) {
+      finalEmail = `${finalEmail.toLowerCase()}@materialflow.app`;
+    }
+
+    try {
+      if (authMode === 'login') {
+        await signInWithEmailAndPassword(auth, finalEmail, password);
+      } else {
+        if (!finalEmail || !password || !displayName) {
+          throw new Error("Preencha todos os campos.");
+        }
+        const userCredential = await createUserWithEmailAndPassword(auth, finalEmail, password);
+        await updateProfile(userCredential.user, { 
+          displayName,
+          photoURL: `https://ui-avatars.com/api/?name=${encodeURIComponent(displayName)}&background=6366f1&color=fff`
+        });
+        
+        await setDoc(doc(db, 'users', userCredential.user.uid), {
+          userId: userCredential.user.uid,
+          email: finalEmail,
+          displayName,
+          createdAt: serverTimestamp(),
+          role: 'admin'
+        }, { merge: true });
+      }
+    } catch (error: any) {
+      console.error("Email Auth Error:", error);
+      let message = "Erro na autenticação. Verifique os dados.";
+      
+      if (error.code === 'auth/user-not-found') message = "Usuário não encontrado.";
+      if (error.code === 'auth/wrong-password') message = "Senha incorreta.";
+      if (error.code === 'auth/email-already-in-use') message = "Este e-mail já está em uso.";
+      if (error.code === 'auth/weak-password') message = "A senha deve ter pelo menos 6 caracteres.";
+      if (error.code === 'auth/invalid-email') message = "E-mail inválido.";
+      if (error.code === 'auth/admin-restricted-operation') message = "O provedor de e-mail/senha não está ativo no Firebase Console.";
+      if (error.code === 'auth/network-request-failed') message = "Falha de conexão. Verifique sua internet.";
+      
+      setAuthError(message);
+    } finally {
+      setIsPendingAuth(false);
+    }
+  };
 
   useEffect(() => {
     if (user && !isInitializingAuth) {
@@ -286,74 +346,174 @@ export default function App() {
 
   if (!user) {
     return (
-      <div className="min-h-screen bg-slate-900 dark:bg-slate-950 flex flex-col items-center justify-center p-8">
-        <div className="max-w-md w-full text-center">
-          <div className="w-20 h-20 bg-indigo-600 rounded-[2rem] flex items-center justify-center shadow-2xl shadow-indigo-500/20 text-white mx-auto mb-8">
-            <Activity className="w-10 h-10" />
+      <div className="min-h-screen bg-slate-900 dark:bg-slate-950 flex flex-col items-center justify-center p-4 md:p-8">
+        <div className="max-w-md w-full">
+          <div className="text-center mb-10">
+            <div className="w-16 h-16 bg-indigo-600 rounded-2xl flex items-center justify-center shadow-2xl shadow-indigo-500/20 text-white mx-auto mb-6">
+              <Activity className="w-8 h-8" />
+            </div>
+            <h1 className="text-2xl font-black text-white mb-2 tracking-tight uppercase">MaterialFlow</h1>
+            <p className="text-slate-400 font-bold text-xs uppercase tracking-widest leading-relaxed">
+              Gestão de compostos e sizes
+            </p>
           </div>
-          <h1 className="text-3xl font-black text-white mb-4 tracking-tight uppercase">MaterialFlow</h1>
-          <p className="text-slate-400 font-bold mb-12 text-sm leading-relaxed">
-            Seu planejamento sincronizado em todos os dispositivos. <br /> Faça login para acessar seus dados.
-          </p>
-          <button 
-            onClick={() => {
-              setAuthError(null);
-              loginWithGoogle().catch(err => setAuthError(err.message));
-            }}
-            className="w-full flex items-center justify-center gap-4 py-4 bg-white text-slate-900 rounded-2xl font-black text-sm uppercase tracking-widest hover:bg-slate-50 transition-all shadow-xl active:scale-[0.98] mb-4"
-          >
-            <svg className="w-5 h-5" viewBox="0 0 24 24">
-              <path fill="currentColor" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
-              <path fill="currentColor" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
-              <path fill="currentColor" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" />
-              <path fill="currentColor" d="M12 5.38c1.62 0 3.06.56 4.21 1.66l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
-            </svg>
-            Entrar com Google
-          </button>
 
-          <button 
-            onClick={() => {
-              setAuthError(null);
-              loginAnonymously().catch(err => {
-                if (err.code === 'auth/admin-restricted-operation') {
-                  setAuthError("O modo 'Usuário Admin' (Anônimo) está desativado no Console do Firebase. Use o login com Google ou habilite o login anônimo no console.");
-                } else {
-                  setAuthError(err.message);
-                }
-              });
-            }}
-            className="w-full flex items-center justify-center gap-4 py-4 bg-indigo-600 text-white rounded-2xl font-black text-sm uppercase tracking-widest hover:bg-indigo-700 transition-all shadow-xl shadow-indigo-500/20 active:scale-[0.98]"
-          >
-            <Settings className="w-5 h-5" />
-            Entrar como Admin
-          </button>
+          <div className="bg-slate-800/40 backdrop-blur-xl border border-white/10 rounded-[2.5rem] p-8 shadow-2xl">
+            <div className="flex gap-1 bg-black/20 p-1 rounded-2xl mb-8">
+              <button 
+                onClick={() => { setAuthMode('login'); setAuthError(null); }}
+                className={cn(
+                  "flex-1 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all",
+                  authMode === 'login' ? "bg-white text-slate-900 shadow-lg" : "text-slate-500 hover:text-slate-300"
+                )}
+              >
+                Entrar
+              </button>
+              <button 
+                onClick={() => { setAuthMode('signup'); setAuthError(null); }}
+                className={cn(
+                  "flex-1 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all",
+                  authMode === 'signup' ? "bg-white text-slate-900 shadow-lg" : "text-slate-500 hover:text-slate-300"
+                )}
+              >
+                Criar Conta
+              </button>
+            </div>
+
+            <form onSubmit={handleEmailAuth} className="space-y-4">
+              {authMode === 'signup' && (
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest px-1">Seu Nome</label>
+                  <div className="relative group">
+                    <UserIcon className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500 group-focus-within:text-indigo-400 transition-colors" />
+                    <input 
+                      type="text" 
+                      placeholder="Ex: João Silva" 
+                      required
+                      value={displayName}
+                      onChange={(e) => setDisplayName(e.target.value)}
+                      className="w-full pl-12 pr-4 py-4 bg-white/5 border border-white/10 rounded-2xl text-xs font-bold text-white focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition-all placeholder:text-slate-600"
+                    />
+                  </div>
+                </div>
+              )}
+
+              <div className="space-y-1.5">
+                <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest px-1">E-mail</label>
+                <div className="relative group">
+                  <Mail className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500 group-focus-within:text-indigo-400 transition-colors" />
+                  <input 
+                    type="email" 
+                    placeholder="seu@email.com" 
+                    required
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    className="w-full pl-12 pr-4 py-4 bg-white/5 border border-white/10 rounded-2xl text-xs font-bold text-white focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition-all placeholder:text-slate-600"
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest px-1">Senha</label>
+                <div className="relative group">
+                  <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500 group-focus-within:text-indigo-400 transition-colors" />
+                  <input 
+                    type="password" 
+                    placeholder="••••••••" 
+                    required
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    className="w-full pl-12 pr-4 py-4 bg-white/5 border border-white/10 rounded-2xl text-xs font-bold text-white focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition-all placeholder:text-slate-600"
+                  />
+                </div>
+              </div>
+
+              <button 
+                type="submit"
+                disabled={isPendingAuth}
+                className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-indigo-700 transition-all shadow-xl shadow-indigo-500/20 active:scale-[0.98] mt-4 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isPendingAuth ? (
+                  <div className="flex items-center justify-center gap-2">
+                    <div className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin" />
+                    Processando...
+                  </div>
+                ) : (
+                  authMode === 'login' ? 'Entrar Agora' : 'Finalizar Cadastro'
+                )}
+              </button>
+            </form>
+
+            <div className="relative py-8">
+              <div className="absolute inset-0 flex items-center">
+                <div className="w-full border-t border-white/5"></div>
+              </div>
+              <div className="relative flex justify-center">
+                <span className="bg-slate-900 px-4 text-[10px] font-black text-slate-600 uppercase tracking-tighter">Ou continue com</span>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <button 
+                onClick={() => {
+                  setAuthError(null);
+                  loginWithGoogle().catch(err => setAuthError(err.message));
+                }}
+                className="flex items-center justify-center gap-3 py-3.5 bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl transition-all group"
+              >
+                <svg className="w-4 h-4 text-white group-hover:scale-110 transition-transform" viewBox="0 0 24 24">
+                  <path fill="currentColor" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+                  <path fill="currentColor" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                  <path fill="currentColor" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" />
+                  <path fill="currentColor" d="M12 5.38c1.62 0 3.06.56 4.21 1.66l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
+                </svg>
+                <span className="text-[10px] font-black text-white uppercase tracking-widest">Google</span>
+              </button>
+
+              <button 
+                onClick={() => {
+                  setAuthError(null);
+                  loginAnonymously().catch(err => {
+                    if (err.code === 'auth/admin-restricted-operation') {
+                      setAuthError("O modo 'Usuário Admin' (Anônimo) está desativado no Firebase Console.");
+                    } else {
+                      setAuthError(err.message);
+                    }
+                  });
+                }}
+                className="flex items-center justify-center gap-3 py-3.5 bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl transition-all group"
+              >
+                <Settings className="w-4 h-4 text-white group-hover:scale-110 transition-transform" />
+                <span className="text-[10px] font-black text-white uppercase tracking-widest">Local</span>
+              </button>
+            </div>
+          </div>
 
           {authError && (
-            <div className="mt-6 p-4 bg-red-500/10 border border-red-500/20 rounded-xl text-red-500 text-xs font-bold leading-relaxed text-left">
-              <div className="flex items-center gap-2 mb-2 text-sm font-black uppercase">
-                <HelpCircle className="w-4 h-4" />
-                Erro de Autenticação
-              </div>
-              <p className="mb-2">{authError}</p>
-              {authError.includes('admin-restricted-operation') || authError.includes('Anônimo') ? (
-                <div className="mt-4 p-3 bg-white/5 rounded-lg border border-white/10 text-slate-300 font-medium">
-                  <p className="mb-1 text-white font-bold">Como resolver:</p>
-                  <ol className="list-decimal ml-4 space-y-1">
-                    <li>No Console do Firebase, clique na <strong>Lupa (Pesquisar)</strong> no topo.</li>
-                    <li>Digite <strong>"Authentication"</strong> e selecione a primeira opção.</li>
-                    <li>Clique na aba <strong>"Sign-in method"</strong>.</li>
-                    <li>Clique em <strong>"Adicionar novo provedor"</strong>.</li>
-                    <li>Escolha <strong>"Anônimo"</strong>, ative a chave e salve.</li>
-                  </ol>
+            <motion.div 
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="mt-6 p-4 bg-red-500/10 border border-red-500/20 rounded-2xl text-red-400 text-xs font-bold"
+            >
+              <div className="flex items-start gap-3">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <div>
+                  <p className="mb-2 font-black uppercase tracking-widest">Erro na Autenticação</p>
+                  <p className="opacity-80 leading-relaxed font-medium">{authError}</p>
                 </div>
-              ) : null}
-            </div>
+              </div>
+            </motion.div>
           )}
-          
-          <div className="mt-12 pt-12 border-t border-white/5 flex items-center justify-center gap-4 text-slate-500 font-bold text-[10px] uppercase tracking-widest">
+
+          <div className="mt-12 text-center text-slate-600 font-bold text-[9px] uppercase tracking-widest flex items-center justify-center gap-4">
             <div className="flex items-center gap-2">
               <Activity className="w-3 h-3" />
               Real-time Sync
+            </div>
+            <div className="w-1 h-1 bg-slate-800 rounded-full" />
+            <div className="flex items-center gap-2">
+              <Lock className="w-3 h-3" />
+              Secure Data
             </div>
           </div>
         </div>
@@ -379,16 +539,28 @@ export default function App() {
 
       <nav className="flex-1 px-4 space-y-1 overflow-y-auto custom-scrollbar pb-8">
         {user && (
-          <div className="px-4 py-3 mb-4 bg-white/5 rounded-2xl flex items-center gap-3">
-            <img src={user.photoURL || `https://ui-avatars.com/api/?name=${user.email}`} alt="User" className="w-8 h-8 rounded-full border border-white/10" />
+          <div className="px-4 py-3 mb-4 bg-white/5 rounded-2xl flex items-center gap-3 relative overflow-hidden group">
+            {user.isAnonymous && (
+              <div className="absolute top-0 right-0 px-2 py-0.5 bg-amber-500 text-black text-[7px] font-black uppercase tracking-tighter rounded-bl-lg">
+                Local Only
+              </div>
+            )}
+            <img src={user.photoURL || `https://ui-avatars.com/api/?name=${user.email || 'Admin'}`} alt="User" className="w-8 h-8 rounded-full border border-white/10" />
             <div className="flex-1 min-w-0">
-              <p className="text-[10px] font-black text-white truncate uppercase tracking-tighter">{user.displayName || user.email?.split('@')[0]}</p>
-              <button 
-                onClick={() => logout()}
-                className="text-[9px] font-bold text-slate-500 hover:text-red-400 transition-colors uppercase tracking-widest"
-              >
-                Sair da Conta
-              </button>
+              <p className="text-[10px] font-black text-white truncate uppercase tracking-tighter">
+                {user.isAnonymous ? 'Modo Local (Admin)' : (user.displayName || user.email?.split('@')[0])}
+              </p>
+              <div className="flex items-center gap-2">
+                <button 
+                  onClick={() => logout()}
+                  className="text-[9px] font-bold text-slate-500 hover:text-red-400 transition-colors uppercase tracking-widest"
+                >
+                  Sair
+                </button>
+                {user.isAnonymous && (
+                  <span className="text-[8px] text-amber-500/50 font-bold">• Não sincroniza</span>
+                )}
+              </div>
             </div>
           </div>
         )}
