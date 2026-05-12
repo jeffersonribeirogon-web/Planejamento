@@ -16,9 +16,10 @@ import { cn } from './lib/utils';
 import { ShiftMonitorView } from './components/ShiftMonitorView';
 import { exportToExcel } from './lib/export';
 import { KanbanCompositionView } from './components/KanbanCompositionView';
-import { Box } from 'lucide-react';
+import { Box, Users } from 'lucide-react';
 import { format, subDays, startOfDay, isBefore } from 'date-fns';
 import { DataManagerView } from './components/DataManagerView';
+import { UsersManagementView } from './components/UsersManagementView';
 
 import { auth, loginWithGoogle, logout, db, handleFirestoreError, OperationType, loginAnonymously } from './lib/firebase';
 import { 
@@ -49,8 +50,10 @@ export default function App() {
   const [globalSearch, setGlobalSearch] = useState('');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
-  const [currentView, setCurrentView] = useState<'schedule' | 'dashboard' | 'shift-monitor' | 'hourly-consumption' | 'kanban' | 'data-manager'>('schedule');
+  const [currentView, setCurrentView] = useState<'schedule' | 'dashboard' | 'shift-monitor' | 'hourly-consumption' | 'kanban' | 'data-manager' | 'user-management'>('schedule');
   
+  const isSuperAdmin = user?.email === 'mixer@materialflow.app';
+
   // Auth Form State
   const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
   const [email, setEmail] = useState('');
@@ -96,7 +99,7 @@ export default function App() {
             email: currentUser.email || `admin@materialflow.app`,
             displayName: currentUser.displayName || 'Usuário Admin',
             photoURL: currentUser.photoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(currentUser.displayName || 'Admin')}&background=6366f1&color=fff`,
-            role: currentUser.isAnonymous ? 'admin' : 'user',
+            role: (currentUser.isAnonymous || currentUser.email === 'mixer@materialflow.app') ? 'admin' : 'user',
             createdAt: serverTimestamp()
           }, { merge: true });
         } catch (error) {
@@ -180,7 +183,7 @@ export default function App() {
           email: finalEmail,
           displayName,
           createdAt: serverTimestamp(),
-          role: 'admin'
+          role: finalEmail === 'mixer@materialflow.app' ? 'admin' : 'user'
         }, { merge: true });
       }
     } catch (error: any) {
@@ -646,6 +649,19 @@ export default function App() {
               <Settings className={cn("w-4 h-4", currentView === 'data-manager' ? "text-white" : "text-slate-500 group-hover:text-slate-300")} />
               Gerenciar Dados
             </button>
+
+            {isSuperAdmin && (
+              <button 
+                onClick={() => { setGlobalSearch(''); setCurrentView('user-management'); setIsMobileMenuOpen(false); }}
+                className={cn(
+                  "w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 group text-sm font-bold",
+                  currentView === 'user-management' ? "bg-indigo-600 text-white shadow-lg shadow-indigo-500/20" : "text-slate-400 hover:bg-white/5 hover:text-white"
+                )}
+              >
+                <Users className={cn("w-4 h-4", currentView === 'user-management' ? "text-white" : "text-slate-500 group-hover:text-slate-300")} />
+                Usuários
+              </button>
+            )}
           </div>
         </div>
 
@@ -779,6 +795,8 @@ export default function App() {
                     onDeleteDates={handleDeleteDates}
                     onClearAll={confirmReset}
                   />
+                ) : currentView === 'user-management' ? (
+                  <UsersManagementView />
                 ) : (
                   <ScheduleView entries={entries} globalSearch={globalSearch} />
                 )}

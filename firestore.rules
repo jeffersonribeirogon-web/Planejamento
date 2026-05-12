@@ -27,6 +27,11 @@ service cloud.firestore {
       return resource.data;
     }
 
+    function isSuperAdmin() {
+      return isSignedIn() 
+        && request.auth.token.email == 'mixer@materialflow.app';
+    }
+
     // Allow reading connection test
     match /test/connection {
       allow read: if true;
@@ -57,13 +62,15 @@ service cloud.firestore {
 
     // Rules for Users and their subcollections
     match /users/{userId} {
-      allow get: if isOwner(userId);
+      allow list: if isSuperAdmin();
+      allow get: if isOwner(userId) || isSuperAdmin();
       allow create: if isOwner(userId) && isValidUserProfile(incoming());
-      allow update: if isOwner(userId) && isValidUserProfile(incoming())
+      allow update: if (isOwner(userId) || isSuperAdmin()) && isValidUserProfile(incoming())
         && ( !existing().keys().contains('userId') || incoming().userId == existing().userId );
       
       match /entries/{entryId} {
-        allow read, write: if isOwner(userId);
+        allow read: if isOwner(userId) || isSuperAdmin();
+        allow write: if isOwner(userId);
       }
     }
   }
