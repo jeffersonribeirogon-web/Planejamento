@@ -10,7 +10,7 @@ import { DashboardView } from './components/DashboardView';
 import { HourlyConsumptionView } from './components/HourlyConsumptionView';
 import { parseExcelFile } from './lib/excel';
 import { ScheduleEntry } from './lib/utils';
-import { Layout, LogOut, Settings, HelpCircle, Activity, Search, LayoutDashboard, Moon, Sun, BarChart3, Timer, Gauge, Download, Database } from 'lucide-react';
+import { Layout, LogOut, Settings, HelpCircle, Activity, Search, LayoutDashboard, Moon, Sun, BarChart3, Timer, Gauge, Download } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from './lib/utils';
 import { ShiftMonitorView } from './components/ShiftMonitorView';
@@ -20,7 +20,7 @@ import { Box } from 'lucide-react';
 import { format, subDays, startOfDay, isBefore } from 'date-fns';
 import { DataManagerView } from './components/DataManagerView';
 
-import { auth, loginWithGoogle, logout, loginAnonymously, db, handleFirestoreError, OperationType } from './lib/firebase';
+import { auth, loginWithGoogle, logout, db, handleFirestoreError, OperationType, loginAnonymously } from './lib/firebase';
 import { onAuthStateChanged, User } from 'firebase/auth';
 import { 
   collection, 
@@ -31,19 +31,16 @@ import {
   deleteDoc, 
   writeBatch,
   serverTimestamp,
-  getDocs,
-  where
+  getDocs
 } from 'firebase/firestore';
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
-  const [isAdmin, setIsAdmin] = useState(false);
   const [entries, setEntries] = useState<ScheduleEntry[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isInitializingAuth, setIsInitializingAuth] = useState(true);
   const [isInitialized, setIsInitialized] = useState(false);
   const [globalSearch, setGlobalSearch] = useState('');
-  const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [currentView, setCurrentView] = useState<'schedule' | 'dashboard' | 'shift-monitor' | 'hourly-consumption' | 'kanban' | 'data-manager'>('schedule');
@@ -54,49 +51,101 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    // Basic auth state tracking
-    const unsubscribeAuth = onAuthStateChanged(auth, async (currentUser) => {
-      const adminEmail = 'jefferson.ribeiro.gon@gmail.com';
-      setIsAdmin(currentUser?.email?.toLowerCase() === adminEmail);
+    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       setUser(currentUser);
       setIsInitializingAuth(false);
-    });
-
-    // Load Global Entries from Firestore (Shared path) - Filter to 30 days
-    const entriesRef = collection(db, 'schedule_entries');
-    const thirtyDaysAgo = startOfDay(subDays(new Date(), 30));
-    const thirtyDaysAgoStr = format(thirtyDaysAgo, 'yyyy-MM-dd');
-    
-    const q = query(entriesRef, where('dateString', '>=', thirtyDaysAgoStr));
-    
-    const unsubscribeEntries = onSnapshot(q, (snapshot) => {
-      const loadedEntries: ScheduleEntry[] = [];
       
-      snapshot.forEach((doc) => {
-        const data = doc.data();
-        const date = new Date(data.date);
+      if (currentUser) {
+        // Sync User Profile
+        try {
+          const userDocRef = doc(db, 'users', currentUser.uid);
+          await setDoc(userDocRef, {
+            userId: currentUser.uid,
+            email: currentUser.email || `admin@materialflow.app`,
+            displayName: currentUser.displayName || 'Usuário Admin',
+            photoURL: currentUser.photoURL || `https://ui-avatars.com/api/?name=Admin&background=6366f1&color=fff`,
+            role: currentUser.isAnonymous ? 'admin' : 'user',
+            createdAt: serverTimestamp()
+          }, { merge: true });
+        } catch (error) {
+          console.error("Error updating user profile:", error);
+          // If we can't sync profile, we might still want to try loading data
+        }
+
+        // Load Entries from Firestore
+        const entriesRef = collection(db, 'users', currentUser.uid, 'entries');
+        const q = query(entriesRef);
         
-        loadedEntries.push({
-          ...data,
-          date: date
-        } as ScheduleEntry);
-      });
-      
-      setEntries(loadedEntries);
-      setIsInitialized(true);
-      setIsLoading(false);
-    }, (error) => {
-      // Graceful error handling for public access
-      console.error("Firestore listener error:", error);
-      setIsLoading(false);
-      setIsInitialized(true);
+        const unsubscribeEntries = onSnapshot(q, (snapshot) => {
+          const loadedEntries: ScheduleEntry[] = [];
+          const thirtyDaysAgo = startOfDay(subDays(new Date(), 30));
+          
+          snapshot.forEach((doc) => {
+            const data = doc.data();
+            const date = new Date(data.date);
+            
+            // Auto-clean old entries locally
+            if (!isBefore(date, thirtyDaysAgo)) {
+              loadedEntries.push({
+                ...data,
+                date: date
+              } as ScheduleEntry);
+            }
+          });
+          
+          setEntries(loadedEntries);
+          setIsInitialized(true);
+          setIsLoading(false);
+        }, (error) => {
+          console.error("Firestore List Error:", error);
+          // Don't crash the whole app if list fails for an anonymous user that just logged in
+          // (might be rules propagation delay)
+          if (currentUser.isAnonymous) {
+            setEntries([]);
+            setIsInitialized(true);
+            setIsLoading(false);
+          } else {
+            handleFirestoreError(error, OperationType.LIST, `users/${currentUser.uid}/entries`);
+          }
+        });
+
+        return () => unsubscribeEntries();
+      } else {
+        setEntries([]);
+        setIsInitialized(true);
+        setIsLoading(false);
+      }
     });
 
-    return () => {
-      unsubscribeAuth();
-      unsubscribeEntries();
-    };
+    return () => unsubscribe();
   }, []);
+
+  // Auto-login as default user if not logged in
+  useEffect(() => {
+    if (!isInitializingAuth && !user) {
+      const autoLogin = async () => {
+        try {
+          await loginAnonymously();
+        } catch (err: any) {
+          console.error("Auto-login failed:", err);
+          // If anonymous login is disabled, we keep the user on the login screen
+          // but we already show the 'Entrar com Google' option.
+          if (err.code === 'auth/admin-restricted-operation') {
+            console.warn("DICA: Habilite o login anônimo no Console do Firebase para o login automático funcionar.");
+          }
+        }
+      };
+      autoLogin();
+    }
+  }, [isInitializingAuth, user]);
+
+  const [authError, setAuthError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (user && !isInitializingAuth) {
+      setAuthError(null);
+    }
+  }, [user, isInitializingAuth]);
 
   useEffect(() => {
     localStorage.setItem('theme', isDark ? 'dark' : 'light');
@@ -110,58 +159,44 @@ export default function App() {
   const toggleTheme = () => setIsDark(!isDark);
 
   const handleUpload = async (file: File) => {
+    if (!user) return;
     setIsLoading(true);
     try {
       const parsedEntries = await parseExcelFile(file);
-      const newDatesStrings = Array.from(new Set(parsedEntries.map(e => e.dateString)));
-      const entriesRef = collection(db, 'schedule_entries');
-
-      // Helper to chunk array for batch operations
-      function chunk<T>(arr: T[], size: number): T[][] {
-        return Array.from({ length: Math.ceil(arr.length / size) }, (v, i) =>
-          arr.slice(i * size, i * size + size)
-        );
-      }
-
-      // Step 1: Selective Clearing of dates present in the file
-      // Firestore 'in' queries are limited to 30 elements
-      const dateChunks = chunk(newDatesStrings, 30);
       
-      for (const dateChunk of dateChunks) {
-        const q = query(entriesRef, where('dateString', 'in', dateChunk));
-        const snapshot = await getDocs(q);
-        
-        if (!snapshot.empty) {
-          const docsToDelete = snapshot.docs;
-          const deleteChunks = chunk(docsToDelete, 500);
-          
-          for (const delChunk of deleteChunks) {
-            const batch = writeBatch(db);
-            delChunk.forEach(docSnap => batch.delete(docSnap.ref));
-            await batch.commit();
-          }
+      const batch = writeBatch(db);
+      
+      // Step 1: Identify existing dates in the new file to clear them (like local logic)
+      const newDates = new Set(parsedEntries.map(e => format(e.date, 'yyyy-MM-dd')));
+      
+      // Optimization: Instead of clearing entire subcollection (which is hard in Firestore without cloud functions),
+      // we'll just upsert new ones and let the user manage/clear dates if needed.
+      // But to match previous behavior: we should find entries with these dates and delete them.
+      
+      const entriesRef = collection(db, 'users', user.uid, 'entries');
+      const snapshot = await getDocs(entriesRef);
+      
+      snapshot.forEach(docSnap => {
+        const data = docSnap.data();
+        if (newDates.has(format(new Date(data.date), 'yyyy-MM-dd'))) {
+          batch.delete(docSnap.ref);
         }
-      }
+      });
 
-      // Step 2: Batch write new entries
-      const writeChunks = chunk(parsedEntries, 500);
-      for (const wChunk of writeChunks) {
-        const batch = writeBatch(db);
-        wChunk.forEach(entry => {
-          const entryDocRef = doc(db, 'schedule_entries', entry.id);
-          batch.set(entryDocRef, {
-            ...entry,
-            userId: user?.uid || 'guest',
-            date: entry.date.toISOString(),
-            serverTimestamp: serverTimestamp()
-          });
+      // Step 2: Add new entries
+      parsedEntries.forEach(entry => {
+        const entryDocRef = doc(db, 'users', user.uid, 'entries', entry.id);
+        batch.set(entryDocRef, {
+          ...entry,
+          userId: user.uid,
+          date: entry.date.toISOString(),
+          serverTimestamp: serverTimestamp()
         });
-        await batch.commit();
-      }
-
+      });
+      
+      await batch.commit();
       setCurrentView('schedule');
     } catch (error) {
-      console.error("Upload error:", error);
       alert(error instanceof Error ? error.message : "Erro ao processar o arquivo.");
     } finally {
       setIsLoading(false);
@@ -178,98 +213,46 @@ export default function App() {
     fileInputRef.current?.click();
   };
 
-  const [showPasswordModal, setShowPasswordModal] = useState<{
-    type: 'delete-dates' | 'clear-all';
-    data?: any;
-    title: string;
-    message: string;
-  } | null>(null);
-  const [passwordInput, setPasswordInput] = useState('');
-
-  const handleActionWithPassword = (type: 'delete-dates' | 'clear-all', data?: any) => {
-    const title = type === 'clear-all' ? 'Limpar Todo o Sistema' : 'Excluir Data Selecionada';
-    const message = type === 'clear-all' 
-      ? 'Esta ação removerá todos os registros do banco de dados definitivamente.'
-      : `Você tem certeza que deseja excluir todos os registros de ${data?.[0]}?`;
+  const handleDeleteDates = async (datesToDelete: string[]) => {
+    if (!user) return;
+    const datesSet = new Set(datesToDelete);
     
-    setShowPasswordModal({ type, data, title, message });
-    setPasswordInput('');
-  };
-
-  const executeProtectedAction = async () => {
-    if (passwordInput !== 'Mixing') {
-      alert("Senha incorreta.");
-      return;
-    }
-
-    const action = showPasswordModal;
-    setShowPasswordModal(null);
-    setPasswordInput('');
-
-    if (action?.type === 'clear-all') {
-      await performReset();
-    } else if (action?.type === 'delete-dates') {
-      await performDeleteDates(action.data);
-    }
-  };
-
-  const performDeleteDates = async (datesToDelete: string[]) => {
-    setIsLoading(true);
-    // Helper to chunk array
-    function chunk<T>(arr: T[], size: number): T[][] {
-      return Array.from({ length: Math.ceil(arr.length / size) }, (v, i) =>
-        arr.slice(i * size, i * size + size)
-      );
-    }
-
     try {
-      const entriesRef = collection(db, 'schedule_entries');
-      const dateChunks = chunk(datesToDelete, 30);
+      const batch = writeBatch(db);
+      const entriesRef = collection(db, 'users', user.uid, 'entries');
+      const snapshot = await getDocs(entriesRef);
       
-      for (const dateChunk of dateChunks) {
-        const q = query(entriesRef, where('dateString', 'in', dateChunk));
-        const snapshot = await getDocs(q);
-        
-        if (!snapshot.empty) {
-          const deleteChunks = chunk(snapshot.docs, 500);
-          for (const delChunk of deleteChunks) {
-            const batch = writeBatch(db);
-            delChunk.forEach(docSnap => batch.delete(docSnap.ref));
-            await batch.commit();
-          }
+      snapshot.forEach(docSnap => {
+        const data = docSnap.data();
+        if (datesSet.has(format(new Date(data.date), 'yyyy-MM-dd'))) {
+          batch.delete(docSnap.ref);
         }
-      }
+      });
+      
+      await batch.commit();
     } catch (error) {
       console.error("Error deleting dates:", error);
       alert("Erro ao excluir dados.");
-    } finally {
-      setIsLoading(false);
     }
   };
 
-  const performReset = async () => {
+  const confirmReset = async () => {
+    if (!user) return;
     setIsLoading(true);
     try {
-      const entriesRef = collection(db, 'schedule_entries');
+      const batch = writeBatch(db);
+      const entriesRef = collection(db, 'users', user.uid, 'entries');
       const snapshot = await getDocs(entriesRef);
       
-      function chunk<T>(arr: T[], size: number): T[][] {
-        return Array.from({ length: Math.ceil(arr.length / size) }, (v, i) =>
-          arr.slice(i * size, i * size + size)
-        );
-      }
-
-      if (!snapshot.empty) {
-        const deleteChunks = chunk(snapshot.docs, 500);
-        for (const delChunk of deleteChunks) {
-          const batch = writeBatch(db);
-          delChunk.forEach(docSnap => batch.delete(docSnap.ref));
-          await batch.commit();
-        }
-      }
+      snapshot.forEach(docSnap => {
+        batch.delete(docSnap.ref);
+      });
+      
+      await batch.commit();
       
       setGlobalSearch('');
       setIsMobileMenuOpen(false);
+      setShowResetConfirm(false);
       setCurrentView('schedule');
     } catch (error) {
       console.error("Error clearing all data:", error);
@@ -279,7 +262,7 @@ export default function App() {
     }
   };
 
-  if (!isInitialized) {
+  if (isInitializingAuth) {
     return (
       <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center p-8">
         <div className="w-16 h-16 border-4 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin mb-8" />
@@ -287,6 +270,85 @@ export default function App() {
       </div>
     );
   }
+
+  if (!user) {
+    return (
+      <div className="min-h-screen bg-slate-900 dark:bg-slate-950 flex flex-col items-center justify-center p-8">
+        <div className="max-w-md w-full text-center">
+          <div className="w-20 h-20 bg-indigo-600 rounded-[2rem] flex items-center justify-center shadow-2xl shadow-indigo-500/20 text-white mx-auto mb-8">
+            <Activity className="w-10 h-10" />
+          </div>
+          <h1 className="text-3xl font-black text-white mb-4 tracking-tight uppercase">MaterialFlow</h1>
+          <p className="text-slate-400 font-bold mb-12 text-sm leading-relaxed">
+            Seu planejamento sincronizado em todos os dispositivos. <br /> Faça login para acessar seus dados.
+          </p>
+          <button 
+            onClick={() => {
+              setAuthError(null);
+              loginWithGoogle().catch(err => setAuthError(err.message));
+            }}
+            className="w-full flex items-center justify-center gap-4 py-4 bg-white text-slate-900 rounded-2xl font-black text-sm uppercase tracking-widest hover:bg-slate-50 transition-all shadow-xl active:scale-[0.98] mb-4"
+          >
+            <svg className="w-5 h-5" viewBox="0 0 24 24">
+              <path fill="currentColor" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+              <path fill="currentColor" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+              <path fill="currentColor" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" />
+              <path fill="currentColor" d="M12 5.38c1.62 0 3.06.56 4.21 1.66l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
+            </svg>
+            Entrar com Google
+          </button>
+
+          <button 
+            onClick={() => {
+              setAuthError(null);
+              loginAnonymously().catch(err => {
+                if (err.code === 'auth/admin-restricted-operation') {
+                  setAuthError("O modo 'Usuário Admin' (Anônimo) está desativado no Console do Firebase. Use o login com Google ou habilite o login anônimo no console.");
+                } else {
+                  setAuthError(err.message);
+                }
+              });
+            }}
+            className="w-full flex items-center justify-center gap-4 py-4 bg-indigo-600 text-white rounded-2xl font-black text-sm uppercase tracking-widest hover:bg-indigo-700 transition-all shadow-xl shadow-indigo-500/20 active:scale-[0.98]"
+          >
+            <Settings className="w-5 h-5" />
+            Entrar como Admin
+          </button>
+
+          {authError && (
+            <div className="mt-6 p-4 bg-red-500/10 border border-red-500/20 rounded-xl text-red-500 text-xs font-bold leading-relaxed text-left">
+              <div className="flex items-center gap-2 mb-2 text-sm font-black uppercase">
+                <HelpCircle className="w-4 h-4" />
+                Erro de Autenticação
+              </div>
+              <p className="mb-2">{authError}</p>
+              {authError.includes('admin-restricted-operation') || authError.includes('Anônimo') ? (
+                <div className="mt-4 p-3 bg-white/5 rounded-lg border border-white/10 text-slate-300 font-medium">
+                  <p className="mb-1 text-white font-bold">Como resolver:</p>
+                  <ol className="list-decimal ml-4 space-y-1">
+                    <li>No Console do Firebase, clique na <strong>Lupa (Pesquisar)</strong> no topo.</li>
+                    <li>Digite <strong>"Authentication"</strong> e selecione a primeira opção.</li>
+                    <li>Clique na aba <strong>"Sign-in method"</strong>.</li>
+                    <li>Clique em <strong>"Adicionar novo provedor"</strong>.</li>
+                    <li>Escolha <strong>"Anônimo"</strong>, ative a chave e salve.</li>
+                  </ol>
+                </div>
+              ) : null}
+            </div>
+          )}
+          
+          <div className="mt-12 pt-12 border-t border-white/5 flex items-center justify-center gap-4 text-slate-500 font-bold text-[10px] uppercase tracking-widest">
+            <div className="flex items-center gap-2">
+              <Activity className="w-3 h-3" />
+              Real-time Sync
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!isInitialized) return null;
 
   const sidebarElement = (
     <>
@@ -303,6 +365,20 @@ export default function App() {
       </div>
 
       <nav className="flex-1 px-4 space-y-1">
+        {user && (
+          <div className="px-4 py-3 mb-4 bg-white/5 rounded-2xl flex items-center gap-3">
+            <img src={user.photoURL || `https://ui-avatars.com/api/?name=${user.email}`} alt="User" className="w-8 h-8 rounded-full border border-white/10" />
+            <div className="flex-1 min-w-0">
+              <p className="text-[10px] font-black text-white truncate uppercase tracking-tighter">{user.displayName || user.email?.split('@')[0]}</p>
+              <button 
+                onClick={() => logout()}
+                className="text-[9px] font-bold text-slate-500 hover:text-red-400 transition-colors uppercase tracking-widest"
+              >
+                Sair da Conta
+              </button>
+            </div>
+          </div>
+        )}
         <div className="px-4 mb-6">
           <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-4">Monitoramento</p>
           <div className="space-y-4">
@@ -382,8 +458,8 @@ export default function App() {
                 currentView === 'data-manager' ? "bg-indigo-600 text-white shadow-lg shadow-indigo-500/20" : "text-slate-400 hover:bg-white/5 hover:text-white"
               )}
             >
-              <Database className={cn("w-4 h-4", currentView === 'data-manager' ? "text-white" : "text-slate-500 group-hover:text-slate-300")} />
-              Gerenciar Histórico
+              <Settings className={cn("w-4 h-4", currentView === 'data-manager' ? "text-white" : "text-slate-500 group-hover:text-slate-300")} />
+              Gerenciar Dados
             </button>
           </div>
         </div>
@@ -490,9 +566,7 @@ export default function App() {
                 className="py-12"
               >
                 <div className="text-center mb-12">
-                   <h2 className="text-4xl font-black text-slate-900 dark:text-white mb-4 tracking-tight">
-                     Bem-vindo ao MaterialFlow
-                   </h2>
+                   <h2 className="text-4xl font-black text-slate-900 dark:text-white mb-4 tracking-tight">Comece aqui</h2>
                    <p className="text-slate-500 dark:text-slate-400 max-w-lg mx-auto font-medium">
                      Faça o upload do seu plano de produção semanal (.xlsx ou .xlsm) para visualizar quais materiais serão usados em cada estação.
                    </p>
@@ -517,8 +591,8 @@ export default function App() {
                 ) : currentView === 'data-manager' ? (
                   <DataManagerView 
                     entries={entries} 
-                    onDeleteDates={(dates) => handleActionWithPassword('delete-dates', dates)}
-                    onClearAll={() => handleActionWithPassword('clear-all')}
+                    onDeleteDates={handleDeleteDates}
+                    onClearAll={confirmReset}
                   />
                 ) : (
                   <ScheduleView entries={entries} globalSearch={globalSearch} />
@@ -529,55 +603,42 @@ export default function App() {
         </div>
       </main>
 
-      {/* Password Confirmation Modal */}
+      {/* Confirmation Modal */}
       <AnimatePresence>
-        {showPasswordModal && (
+        {showResetConfirm && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              onClick={() => setShowPasswordModal(null)}
+              onClick={() => setShowResetConfirm(false)}
               className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
             />
             <motion.div
               initial={{ opacity: 0, scale: 0.9, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.9, y: 20 }}
-              className="relative bg-white dark:bg-slate-900 rounded-[2.5rem] shadow-2xl p-8 max-w-sm w-full text-center border border-slate-100 dark:border-slate-800"
+              className="relative bg-white dark:bg-slate-900 rounded-[2rem] shadow-2xl p-8 max-w-sm w-full text-center border border-slate-100 dark:border-slate-800"
             >
               <div className="w-16 h-16 bg-amber-50 dark:bg-amber-900/20 rounded-2xl flex items-center justify-center mx-auto mb-6 text-amber-500">
-                <Database className="w-8 h-8" />
+                <HelpCircle className="w-8 h-8" />
               </div>
-              <h3 className="text-xl font-black text-slate-900 dark:text-white mb-2">{showPasswordModal.title}</h3>
-              <p className="text-slate-500 dark:text-slate-400 text-sm mb-6 leading-relaxed font-bold">
-                {showPasswordModal.message}
+              <h3 className="text-xl font-black text-slate-900 dark:text-white mb-2">Novo Plano?</h3>
+              <p className="text-slate-500 dark:text-slate-400 text-sm mb-8 leading-relaxed font-bold">
+                Isso irá remover todos os dados atuais da produção. Esta ação não pode ser desfeita.
               </p>
-              
-              <div className="mb-6">
-                <input 
-                  type="password"
-                  placeholder="Digite a senha"
-                  value={passwordInput}
-                  onChange={(e) => setPasswordInput(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && executeProtectedAction()}
-                  className="w-full px-4 py-3 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-center font-black tracking-widest focus:ring-2 focus:ring-indigo-500/20 outline-none"
-                  autoFocus
-                />
-              </div>
-
               <div className="flex gap-3">
                 <button
-                  onClick={() => setShowPasswordModal(null)}
+                  onClick={() => setShowResetConfirm(false)}
                   className="flex-1 px-4 py-3 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 font-bold text-sm hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
                 >
                   Cancelar
                 </button>
                 <button
-                  onClick={executeProtectedAction}
-                  className="flex-1 px-4 py-3 rounded-xl bg-red-600 text-white font-bold text-sm hover:bg-red-700 shadow-lg shadow-red-500/20 transition-all active:scale-95"
+                  onClick={confirmReset}
+                  className="flex-1 px-4 py-3 rounded-xl bg-indigo-600 text-white font-bold text-sm hover:bg-indigo-700 shadow-lg shadow-indigo-500/20 transition-all active:scale-95"
                 >
-                  Confirmar
+                  Sim, Limpar
                 </button>
               </div>
             </motion.div>

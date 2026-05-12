@@ -8,7 +8,6 @@
         "id": { "type": "string" },
         "userId": { "type": "string" },
         "date": { "type": "string", "format": "date-time" },
-        "dateString": { "type": "string" },
         "machine": { "type": "string" },
         "productCode": { "type": "string" },
         "productPieceQty": { "type": "number" },
@@ -40,9 +39,9 @@
       "schema": "UserProfile",
       "description": "Storage for user profile data"
     },
-    "schedule_entries/{entryId}": {
+    "users/{userId}/entries/{entryId}": {
       "schema": "ScheduleEntry",
-      "description": "Global shared schedule entries"
+      "description": "Schedule entries belonging to a specific user"
     }
   }
 }

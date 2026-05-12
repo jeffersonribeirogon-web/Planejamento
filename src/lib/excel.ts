@@ -1,6 +1,5 @@
 import * as XLSX from 'xlsx';
 import { ScheduleEntry } from './utils';
-import { format } from 'date-fns';
 
 const PORTUGUESE_MONTHS: Record<string, number> = {
   'jan': 0, 'fev': 1, 'mar': 2, 'abr': 3, 'mai': 4, 'jun': 5,
@@ -167,7 +166,6 @@ export async function parseExcelFile(file: File): Promise<ScheduleEntry[]> {
                 entries.push({
                   id: `entry-${i}-${dayIdx}-${Date.now()}`,
                   date: dayDate,
-                  dateString: format(dayDate, 'yyyy-MM-dd'),
                   machine: currentMachine,
                   productCode: currentProductCodes[dayIdx] || 'N/A',
                   productPieceQty: currentPieceQtys[dayIdx] || 0,

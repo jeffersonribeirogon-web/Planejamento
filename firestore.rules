@@ -15,16 +15,8 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == userId;
     }
 
-    function isAdmin() {
-      return isSignedIn() 
-        && (
-          request.auth.token.get('email', '').toLower() == "jefferson.ribeiro.gon@gmail.com"
-          || request.auth.uid == "tDAndbHWmjNliBIg48vRuSrReaA2"
-        );
-    }
-
     function isValidId(id) {
-      return id is string && id.size() <= 128;
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
     function incoming() {
@@ -46,11 +38,10 @@ service cloud.firestore {
     }
 
     function isValidScheduleEntry(data) {
-      return data.keys().hasAll(['id', 'userId', 'date', 'dateString', 'machine', 'productCode', 'material', 'quantity'])
+      return data.keys().hasAll(['id', 'userId', 'date', 'machine', 'productCode', 'material', 'quantity'])
         && data.id is string
-        && data.userId is string
-        && data.date is string
-        && data.dateString is string
+        && data.userId == request.auth.uid
+        && data.date is string // Stored as ISO string or timestamp, but code uses Date objects which become timestamps/strings
         && data.machine is string
         && data.productCode is string
         && data.material is string
@@ -59,17 +50,23 @@ service cloud.firestore {
         && ( !data.keys().contains('serverTimestamp') || data.serverTimestamp == request.time );
     }
 
-    // Rules for Users (Private profiles)
+    // Rules for Users
     match /users/{userId} {
       allow get: if isOwner(userId);
       allow create: if isOwner(userId) && isValidUserProfile(incoming());
       allow update: if isOwner(userId) && isValidUserProfile(incoming())
-        && incoming().userId == existing().userId;
+        && ( !existing().keys().contains('userId') || incoming().userId == existing().userId );
     }
 
-    // Rules for Entries (Shared Global Space)
-    match /schedule_entries/{entryId} {
-      allow read, write: if true;
+    // Rules for Entries (Moved outside users for explicit path matching if needed)
+    match /users/{userId}/entries/{entryId} {
+      allow list: if isOwner(userId);
+      allow get: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidScheduleEntry(incoming());
+      allow update: if isOwner(userId) && isValidScheduleEntry(incoming())
+        && ( !existing().keys().contains('id') || incoming().id == existing().id )
+        && ( !existing().keys().contains('userId') || incoming().userId == existing().userId );
+      allow delete: if isOwner(userId);
     }
   }
 }
