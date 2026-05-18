@@ -63,30 +63,33 @@ export function ShiftMonitorView({ entries }: ShiftMonitorViewProps) {
 
   // Calculate totals
   const totals = useMemo(() => {
-    const materialSummary: Record<string, { total: number; unit: string; machine: string; materialClass: string }> = {};
+    const materialSummary: Record<string, { total: number; unit: string; machines: string[]; materialClass: string }> = {};
     let totalWeight = 0;
 
     shiftEntries.forEach(e => {
       const qty = parseFloat(e.quantity) || 0;
       totalWeight += qty;
       
-      const key = `${e.machine}-${e.material}`;
+      const key = e.material;
       if (!materialSummary[key]) {
         materialSummary[key] = { 
           total: 0, 
           unit: e.unit, 
-          machine: e.machine,
+          machines: [],
           materialClass: e.materialClass
         };
       }
       materialSummary[key].total += qty;
+      if (!materialSummary[key].machines.includes(e.machine)) {
+        materialSummary[key].machines.push(e.machine);
+      }
     });
 
     return {
       totalWeight,
       materials: Object.entries(materialSummary)
-        .map(([key, data]) => ({
-          material: key.split('-')[1],
+        .map(([material, data]) => ({
+          material,
           ...data
         }))
         .sort((a, b) => b.total - a.total)
@@ -204,7 +207,7 @@ export function ShiftMonitorView({ entries }: ShiftMonitorViewProps) {
                 Detalhamento por Composto
               </h3>
               <div className="bg-slate-50 dark:bg-slate-800/50 px-4 py-2 rounded-xl border border-slate-100 dark:border-slate-700">
-                <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest leading-none">Total Máquinas: {new Set(totals.materials.map(m => m.machine)).size}</span>
+                <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest leading-none">Total Máquinas: {new Set(totals.materials.flatMap(m => m.machines)).size}</span>
               </div>
             </div>
             
@@ -219,36 +222,40 @@ export function ShiftMonitorView({ entries }: ShiftMonitorViewProps) {
                     <table className="w-full text-left border-collapse">
                       <thead>
                         <tr className="bg-slate-50/50 dark:bg-slate-800/30 uppercase tracking-widest">
-                          <th className="px-8 py-5 text-[10px] font-black text-slate-500 whitespace-nowrap">Máquina</th>
-                          <th className="px-8 py-5 text-[10px] font-black text-slate-500 whitespace-nowrap">Material</th>
+                          <th className="px-8 py-5 text-[10px] font-black text-slate-500 whitespace-nowrap">Máquinas</th>
+                          <th className="px-8 py-5 text-[10px] font-black text-slate-500 whitespace-nowrap tracking-wider">Composto</th>
                           <th className="px-8 py-5 text-[10px] font-black text-slate-500 whitespace-nowrap text-right">Total Dia</th>
                           <th className="px-8 py-5 text-[10px] font-black text-slate-500 whitespace-nowrap text-right">Taxa (kg/h)</th>
                           <th className="px-8 py-5 text-[10px] font-black text-slate-500 whitespace-nowrap text-right">Já Usado (Est.)</th>
-                          <th className="px-8 py-5 text-[10px] font-black text-indigo-500 whitespace-nowrap text-right">Falta (Est.)</th>
+                          <th className="px-8 py-5 text-[10px] font-black text-indigo-500 whitespace-nowrap text-right tracking-tight">Falta (Est.)</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                         {totals.materials.map((m, idx) => (
-                          <tr key={`${m.machine}-${m.material}-${idx}`} className="group hover:bg-slate-50/50 dark:hover:bg-slate-800/20 transition-colors">
+                          <tr key={`${m.material}-${idx}`} className="group hover:bg-slate-50/50 dark:hover:bg-slate-800/20 transition-colors">
                             <td className="px-8 py-6">
-                              <div className="flex items-center gap-3">
-                                <div className="flex flex-col">
-                                  <span className="text-[9px] font-black text-indigo-500 uppercase tracking-widest leading-none mb-1">
-                                    {getMachineUnit(m.machine)}
-                                  </span>
-                                  <div className="flex items-center gap-2">
-                                    <div className="w-8 h-8 bg-slate-900 rounded-lg flex items-center justify-center text-[10px] font-black text-white">
-                                      {m.machine}
+                              <div className="flex flex-col gap-1">
+                                <div className="flex flex-wrap gap-1.5 pt-1">
+                                  {m.machines.map(machine => (
+                                    <div key={machine} className="flex items-center gap-1.5 bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700">
+                                      <span className="text-[8px] font-black text-indigo-600 dark:text-indigo-400 uppercase tracking-tighter leading-none">
+                                        {getMachineUnit(machine)}
+                                      </span>
+                                      <span className="text-[10px] font-black text-slate-900 dark:text-white leading-none">
+                                        {machine}
+                                      </span>
                                     </div>
-                                    <span className="text-xs font-black text-slate-400 dark:text-slate-500">MÁQ</span>
-                                  </div>
+                                  ))}
                                 </div>
+                                <span className="text-[9px] font-black text-slate-400 uppercase mt-1">
+                                  {m.machines.length} {m.machines.length === 1 ? 'Máquina' : 'Máquinas'}
+                                </span>
                               </div>
                             </td>
                             <td className="px-8 py-6">
                               <div>
-                                <div className="text-sm font-black text-slate-900 dark:text-white uppercase">{m.material}</div>
-                                <div className="text-[9px] font-bold text-slate-400 dark:text-slate-600 uppercase tracking-wider">{m.materialClass}</div>
+                                <div className="text-sm font-black text-slate-900 dark:text-white uppercase leading-tight">{m.material}</div>
+                                <div className="text-[9px] font-bold text-slate-400 dark:text-slate-600 uppercase tracking-wider mt-1">{m.materialClass}</div>
                               </div>
                             </td>
                             <td className="px-8 py-6 text-right tabular-nums">
