@@ -3,7 +3,7 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, 
   PieChart, Pie, Cell, LineChart, Line, Legend 
 } from 'recharts';
-import { ScheduleEntry } from '../lib/utils';
+import { ScheduleEntry, getFastDateStr } from '../lib/utils';
 import { format, isSameDay } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { motion, AnimatePresence } from 'motion/react';
@@ -32,7 +32,7 @@ export function DashboardView({ entries }: DashboardViewProps) {
 
   // Available days for filter
   const availableDays = useMemo(() => {
-    const days = Array.from(new Set(entries.map(e => format(e.date, 'yyyy-MM-dd'))));
+    const days = Array.from(new Set(entries.map(e => getFastDateStr(e.date))));
     return days.sort();
   }, [entries]);
 
@@ -44,7 +44,7 @@ export function DashboardView({ entries }: DashboardViewProps) {
         ? new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)
         : now;
       
-      const todayStr = format(productionDate, 'yyyy-MM-dd');
+      const todayStr = getFastDateStr(productionDate);
       if (availableDays.includes(todayStr)) {
         setSelectedDay(todayStr);
       } else {
@@ -56,7 +56,7 @@ export function DashboardView({ entries }: DashboardViewProps) {
   // Filter entries based on selected day
   const filteredEntries = useMemo(() => {
     if (selectedDay === 'all' || !selectedDay) return entries;
-    return entries.filter(e => format(e.date, 'yyyy-MM-dd') === selectedDay);
+    return entries.filter(e => getFastDateStr(e.date) === selectedDay);
   }, [entries, selectedDay]);
 
   // Alerts: Sizes starting within 36 hours
@@ -104,8 +104,10 @@ export function DashboardView({ entries }: DashboardViewProps) {
       // Machine Usage
       machineUsage[e.machine] = (machineUsage[e.machine] || 0) + qty;
 
-      // Daily Usage (for the full dataset, but we show trend)
-      const dayKey = format(e.date, 'dd/MM');
+      // Daily Usage (for the full dataset, but we show trend) (Super Fast custom format dd/MM)
+      const day = String(e.date.getDate()).padStart(2, '0');
+      const month = String(e.date.getMonth() + 1).padStart(2, '0');
+      const dayKey = `${day}/${month}`;
       dailyUsage[dayKey] = (dailyUsage[dayKey] || 0) + qty;
     });
 

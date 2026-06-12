@@ -10,7 +10,8 @@ interface KanbanCompositionViewProps {
 export const KanbanCompositionView: React.FC<KanbanCompositionViewProps> = ({ entries }) => {
   const [searchTerm, setSearchTerm] = useState('');
 
-  const compositionByProduct = useMemo(() => {
+  // 1. Heavy raw composition grouping - depends only on entries
+  const rawProductCompositions = useMemo(() => {
     const productStats = new Map<string, { 
       materials: Map<string, { materialClass: string; unit: string; totalWeight: number }>;
       sessions: Set<string>;
@@ -52,10 +53,15 @@ export const KanbanCompositionView: React.FC<KanbanCompositionViewProps> = ({ en
             weightPerPiece: matStats.totalWeight / totalPieces
           })).sort((a, b) => a.material.localeCompare(b.material))
         };
-      })
+      });
+  }, [entries]);
+
+  // 2. Light filter and sort based on search term
+  const compositionByProduct = useMemo(() => {
+    return rawProductCompositions
       .filter(p => p.productCode.toLowerCase().includes(searchTerm.toLowerCase()))
       .sort((a, b) => a.productCode.localeCompare(b.productCode, undefined, { numeric: true }));
-  }, [entries, searchTerm]);
+  }, [rawProductCompositions, searchTerm]);
 
   return (
     <div className="w-full max-w-6xl mx-auto p-4 md:p-6 space-y-8">

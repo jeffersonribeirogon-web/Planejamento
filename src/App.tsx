@@ -48,6 +48,26 @@ export default function App() {
   const [isInitializingAuth, setIsInitializingAuth] = useState(true);
   const [isInitialized, setIsInitialized] = useState(false);
   const [globalSearch, setGlobalSearch] = useState('');
+  const [searchInput, setSearchInput] = useState('');
+
+  // Debounce search input to globalSearch
+  useEffect(() => {
+    if (!searchInput) {
+      setGlobalSearch('');
+      return;
+    }
+
+    const handler = setTimeout(() => {
+      setGlobalSearch(searchInput);
+    }, 350);
+
+    return () => clearTimeout(handler);
+  }, [searchInput]);
+
+  const handleClearSearch = () => {
+    setSearchInput('');
+    setGlobalSearch('');
+  };
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [currentView, setCurrentView] = useState<'schedule' | 'dashboard' | 'shift-monitor' | 'hourly-consumption' | 'kanban' | 'data-manager' | 'user-management'>('schedule');
@@ -575,9 +595,9 @@ export default function App() {
               <input 
                 type="text" 
                 placeholder="buscar composto ou size" 
-                value={globalSearch}
+                value={searchInput}
                 onChange={(e) => {
-                  setGlobalSearch(e.target.value);
+                  setSearchInput(e.target.value);
                   if (e.target.value) setCurrentView('schedule');
                 }}
                 className="w-full pl-10 pr-4 py-2.5 bg-white/5 border border-white/10 rounded-xl text-xs font-bold text-white focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition-all placeholder:text-slate-600 focus:bg-white/10"
@@ -585,7 +605,7 @@ export default function App() {
             </div>
 
             <button 
-              onClick={() => { setGlobalSearch(''); setCurrentView('schedule'); setIsMobileMenuOpen(false); }}
+              onClick={() => { handleClearSearch(); setCurrentView('schedule'); setIsMobileMenuOpen(false); }}
               className={cn(
                 "w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 group text-sm font-bold",
                 (currentView === 'schedule' && !globalSearch) ? "bg-indigo-600 text-white shadow-lg shadow-indigo-500/20" : "text-slate-400 hover:bg-white/5 hover:text-white"
@@ -596,7 +616,7 @@ export default function App() {
             </button>
 
             <button 
-              onClick={() => { setGlobalSearch(''); setCurrentView('dashboard'); setIsMobileMenuOpen(false); }}
+              onClick={() => { handleClearSearch(); setCurrentView('dashboard'); setIsMobileMenuOpen(false); }}
               className={cn(
                 "w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 group text-sm font-bold",
                 currentView === 'dashboard' ? "bg-indigo-600 text-white shadow-lg shadow-indigo-500/20" : "text-slate-400 hover:bg-white/5 hover:text-white"
@@ -607,7 +627,7 @@ export default function App() {
             </button>
 
             <button 
-              onClick={() => { setGlobalSearch(''); setCurrentView('shift-monitor'); setIsMobileMenuOpen(false); }}
+              onClick={() => { handleClearSearch(); setCurrentView('shift-monitor'); setIsMobileMenuOpen(false); }}
               className={cn(
                 "w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 group text-sm font-bold",
                 currentView === 'shift-monitor' ? "bg-indigo-600 text-white shadow-lg shadow-indigo-500/20" : "text-slate-400 hover:bg-white/5 hover:text-white"
@@ -618,7 +638,7 @@ export default function App() {
             </button>
 
             <button 
-              onClick={() => { setGlobalSearch(''); setCurrentView('hourly-consumption'); setIsMobileMenuOpen(false); }}
+              onClick={() => { handleClearSearch(); setCurrentView('hourly-consumption'); setIsMobileMenuOpen(false); }}
               className={cn(
                 "w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 group text-sm font-bold",
                 currentView === 'hourly-consumption' ? "bg-indigo-600 text-white shadow-lg shadow-indigo-500/20" : "text-slate-400 hover:bg-white/5 hover:text-white"
@@ -629,7 +649,7 @@ export default function App() {
             </button>
 
             <button 
-              onClick={() => { setGlobalSearch(''); setCurrentView('kanban'); setIsMobileMenuOpen(false); }}
+              onClick={() => { handleClearSearch(); setCurrentView('kanban'); setIsMobileMenuOpen(false); }}
               className={cn(
                 "w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 group text-sm font-bold",
                 currentView === 'kanban' ? "bg-indigo-600 text-white shadow-lg shadow-indigo-500/20" : "text-slate-400 hover:bg-white/5 hover:text-white"
@@ -640,7 +660,7 @@ export default function App() {
             </button>
 
             <button 
-              onClick={() => { setGlobalSearch(''); setCurrentView('data-manager'); setIsMobileMenuOpen(false); }}
+              onClick={() => { handleClearSearch(); setCurrentView('data-manager'); setIsMobileMenuOpen(false); }}
               className={cn(
                 "w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 group text-sm font-bold",
                 currentView === 'data-manager' ? "bg-indigo-600 text-white shadow-lg shadow-indigo-500/20" : "text-slate-400 hover:bg-white/5 hover:text-white"
@@ -652,7 +672,7 @@ export default function App() {
 
             {isSuperAdmin && (
               <button 
-                onClick={() => { setGlobalSearch(''); setCurrentView('user-management'); setIsMobileMenuOpen(false); }}
+                onClick={() => { handleClearSearch(); setCurrentView('user-management'); setIsMobileMenuOpen(false); }}
                 className={cn(
                   "w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 group text-sm font-bold",
                   currentView === 'user-management' ? "bg-indigo-600 text-white shadow-lg shadow-indigo-500/20" : "text-slate-400 hover:bg-white/5 hover:text-white"

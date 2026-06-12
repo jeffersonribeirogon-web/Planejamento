@@ -1,5 +1,5 @@
 import { useMemo, useState, useEffect } from 'react';
-import { ScheduleEntry, getMachineUnit } from '../lib/utils';
+import { ScheduleEntry, getMachineUnit, getFastDateStr } from '../lib/utils';
 import { format, addDays, subDays, startOfDay, isSameDay } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { 
@@ -58,7 +58,8 @@ export function ShiftMonitorView({ entries }: ShiftMonitorViewProps) {
 
   // Filter entries for the current shift day
   const shiftEntries = useMemo(() => {
-    return entries.filter(e => isSameDay(startOfDay(e.date), shiftInfo.shiftDate));
+    const targetDateStr = getFastDateStr(shiftInfo.shiftDate);
+    return entries.filter(e => getFastDateStr(e.date) === targetDateStr);
   }, [entries, shiftInfo.shiftDate]);
 
   // Calculate totals

@@ -1,5 +1,5 @@
 import { useMemo, useState, useEffect } from 'react';
-import { ScheduleEntry, getMachineUnit } from '../lib/utils';
+import { ScheduleEntry, getMachineUnit, getFastDateStr } from '../lib/utils';
 import { format, startOfDay } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { 
@@ -19,7 +19,7 @@ interface HourlyConsumptionViewProps {
 export function HourlyConsumptionView({ entries }: HourlyConsumptionViewProps) {
   // Available dates from entries
   const availableDates = useMemo(() => {
-    const uniqueDates = Array.from(new Set(entries.map(e => format(e.date, 'yyyy-MM-dd'))));
+    const uniqueDates = Array.from(new Set(entries.map(e => getFastDateStr(e.date))));
     return uniqueDates.sort();
   }, [entries]);
 
@@ -35,7 +35,7 @@ export function HourlyConsumptionView({ entries }: HourlyConsumptionViewProps) {
         ? new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)
         : now;
       
-      const todayStr = format(productionDate, 'yyyy-MM-dd');
+      const todayStr = getFastDateStr(productionDate);
       if (availableDates.includes(todayStr)) {
         setSelectedDate(todayStr);
       } else if (availableDates.length > 0) {
@@ -48,7 +48,7 @@ export function HourlyConsumptionView({ entries }: HourlyConsumptionViewProps) {
   const machineProductRates = useMemo(() => {
     if (!selectedDate) return [];
 
-    const dayEntries = entries.filter(e => format(e.date, 'yyyy-MM-dd') === selectedDate);
+    const dayEntries = entries.filter(e => getFastDateStr(e.date) === selectedDate);
     
     // Count unique product codes per machine
     const machineProductsMap = new Map<string, Set<string>>();

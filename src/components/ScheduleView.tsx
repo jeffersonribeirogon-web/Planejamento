@@ -2,7 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { Search, Filter, Calendar as CalendarIcon, Package, Cpu, ArrowRight, Layers, FileText } from 'lucide-react';
-import { ScheduleEntry, cn, getMachineUnit } from '../lib/utils';
+import { ScheduleEntry, cn, getMachineUnit, getFastDateStr } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
 
 interface ScheduleViewProps {
@@ -33,7 +33,7 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({ entries, globalSearc
   const [selectedMachine, setSelectedMachine] = useState<string | 'all'>('all');
   
   const availableDates = useMemo(() => {
-    const rawDates = entries.map(e => format(e.date, 'yyyy-MM-dd'));
+    const rawDates = entries.map(e => getFastDateStr(e.date));
     const uniqueDates = Array.from(new Set(rawDates)) as string[];
     return uniqueDates.sort((a, b) => a.localeCompare(b));
   }, [entries]);
@@ -64,24 +64,83 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({ entries, globalSearc
   const tracedResults = useMemo(() => {
     if (!globalSearch) return [];
     
+    const term = globalSearch.toLowerCase();
     const results: Array<{ date: Date, machine: string, productCode: string, qty: number, pieceQty: number }> = [];
+    
     entries.forEach(e => {
         const productCode = e.productCode || '';
         const material = e.material || '';
-        const matches = productCode.toLowerCase().includes(globalSearch.toLowerCase()) || 
-                       material.toLowerCase().includes(globalSearch.toLowerCase());
+        const matches = productCode.toLowerCase().includes(term) || 
+                       material.toLowerCase().includes(term);
         if (matches) {
             results.push({
                 date: e.date,
                 machine: e.machine,
                 productCode: e.productCode,
-                qty: parseFloat(e.quantity),
+                qty: parseFloat(e.quantity) || 0,
                 pieceQty: e.productPieceQty || 0
             });
         }
     });
     return results.sort((a, b) => a.date.getTime() - b.date.getTime());
   }, [entries, globalSearch]);
+
+  const [traceStartDate, setTraceStartDate] = useState<string>('');
+  const [traceEndDate, setTraceEndDate] = useState<string>('');
+  const [tracePreset, setTracePreset] = useState<string>('all');
+
+  // Synchronize trace start/end with the min/max dates of the search results
+  React.useEffect(() => {
+    if (globalSearch && tracedResults.length > 0) {
+      const dates = tracedResults.map(r => getFastDateStr(r.date)).sort();
+      setTraceStartDate(dates[0]);
+      setTraceEndDate(dates[dates.length - 1]);
+      setTracePreset('all');
+    }
+  }, [globalSearch, tracedResults]);
+
+  const handlePresetChange = (preset: string) => {
+    setTracePreset(preset);
+    if (tracedResults.length === 0) return;
+
+    const uniqueDates = Array.from(new Set(tracedResults.map(r => getFastDateStr(r.date)))).sort();
+    const maxDateStr = uniqueDates[uniqueDates.length - 1];
+
+    if (preset === 'all') {
+      setTraceStartDate(uniqueDates[0]);
+      setTraceEndDate(maxDateStr);
+    } else if (preset === '1') {
+      setTraceStartDate(maxDateStr);
+      setTraceEndDate(maxDateStr);
+    } else if (preset === '3') {
+      const startIndex = Math.max(0, uniqueDates.length - 3);
+      setTraceStartDate(uniqueDates[startIndex]);
+      setTraceEndDate(maxDateStr);
+    } else if (preset === '7') {
+      const startIndex = Math.max(0, uniqueDates.length - 7);
+      setTraceStartDate(uniqueDates[startIndex]);
+      setTraceEndDate(maxDateStr);
+    } else if (preset === '15') {
+      const startIndex = Math.max(0, uniqueDates.length - 15);
+      setTraceStartDate(uniqueDates[startIndex]);
+      setTraceEndDate(maxDateStr);
+    } else if (preset === '30') {
+      const startIndex = Math.max(0, uniqueDates.length - 30);
+      setTraceStartDate(uniqueDates[startIndex]);
+      setTraceEndDate(maxDateStr);
+    }
+  };
+
+  const filteredTracedResults = useMemo(() => {
+    if (!globalSearch) return [];
+    
+    return tracedResults.filter(r => {
+      const dateStr = getFastDateStr(r.date);
+      if (traceStartDate && dateStr < traceStartDate) return false;
+      if (traceEndDate && dateStr > traceEndDate) return false;
+      return true;
+    });
+  }, [tracedResults, traceStartDate, traceEndDate]);
 
   const machines = useMemo(() => {
     const rawMachines = entries.map(e => e.machine);
@@ -99,7 +158,7 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({ entries, globalSearc
     }> = {};
 
     entries.forEach(e => {
-        const dateStr = format(e.date, 'yyyy-MM-dd');
+        const dateStr = getFastDateStr(e.date);
         if (dateStr !== selectedDate) return;
         
         if (selectedMachine !== 'all' && e.machine !== selectedMachine) return;
@@ -155,7 +214,7 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({ entries, globalSearc
     <div className="w-full max-w-6xl mx-auto p-4 md:p-6 space-y-6">
       {globalSearch ? (
         <div className="space-y-6">
-          <header className="bg-indigo-600 p-6 md:p-8 rounded-2xl md:rounded-[2.5rem] text-white shadow-xl shadow-indigo-100 dark:shadow-none relative overflow-hidden">
+          <header className="bg-indigo-600 p-6 md:p-8 rounded-2xl md:rounded-[2.5rem] text-white shadow-xl relative overflow-hidden">
              <div className="absolute right-0 top-0 w-64 h-64 bg-white/10 rounded-full -translate-y-1/2 translate-x-1/2 blur-3xl shrink-0" />
              <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
                 <div>
@@ -166,18 +225,104 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({ entries, globalSearc
                   <h2 className="text-3xl md:text-4xl font-black tracking-tight leading-none uppercase">
                     {globalSearch}
                   </h2>
-                  <p className="mt-2 text-indigo-100/80 font-bold text-sm">
-                    Localizado em {new Set(tracedResults.map(r => r.machine)).size} máquinas e {new Set(tracedResults.map(r => r.productCode)).size} tamanhos
+                  <p className="mt-2 text-indigo-100/80 font-bold text-xs sm:text-sm">
+                    Exibindo {new Set(filteredTracedResults.map(r => r.machine)).size} de {new Set(tracedResults.map(r => r.machine)).size} máquinas e {new Set(filteredTracedResults.map(r => r.productCode)).size} de {new Set(tracedResults.map(r => r.productCode)).size} tamanhos no período.
                   </p>
                 </div>
-                <div className="bg-white/10 backdrop-blur-md px-4 md:px-6 py-3 md:py-4 rounded-2xl md:rounded-3xl border border-white/20">
-                   <span className="block text-[10px] font-black uppercase tracking-widest text-indigo-100 mb-1">Total Consumido</span>
+                <div className="bg-white/10 backdrop-blur-md px-4 md:px-6 py-3 md:py-4 rounded-2xl md:rounded-3xl border border-white/20 min-w-[150px]">
+                   <span className="block text-[10px] font-black uppercase tracking-widest text-indigo-100 mb-1">Total no Período</span>
                    <span className="text-2xl md:text-3xl font-black tabular-nums">
-                     {numberFormatter.format(tracedResults.reduce((acc, r) => acc + r.qty, 0))} <span className="text-sm">kg</span>
+                     {numberFormatter.format(filteredTracedResults.reduce((acc, r) => acc + r.qty, 0))} <span className="text-sm">kg</span>
                    </span>
+                   {filteredTracedResults.length !== tracedResults.length && (
+                      <span className="block text-[9px] font-bold text-indigo-200 mt-1">
+                        Total Geral: {numberFormatter.format(tracedResults.reduce((acc, r) => acc + r.qty, 0))} kg
+                      </span>
+                   )}
                 </div>
              </div>
           </header>
+
+          {/* Filtros de Data para Rastreabilidade */}
+          <div className="bg-white dark:bg-slate-900 p-5 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm space-y-4">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+              <div>
+                <h3 className="text-xs font-black text-slate-800 dark:text-white uppercase tracking-widest flex items-center gap-2">
+                  <CalendarIcon className="w-3.5 h-3.5 text-indigo-500" />
+                  Filtrar Resultados por Período
+                </h3>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
+                  Selecione atalhos baseados nos dias de produção encontrados ou defina as datas manualmente.
+                </p>
+              </div>
+
+              {/* Atalhos Rápidos */}
+              <div className="flex flex-wrap gap-1.5 pt-1">
+                {[
+                  { id: 'all', label: 'Ver Tudo' },
+                  { id: '1', label: 'Último Dia' },
+                  { id: '3', label: 'Últimos 3 Dias' },
+                  { id: '7', label: 'Últimos 7 Dias' },
+                  { id: '15', label: 'Últimos 15 Dias' },
+                  { id: '30', label: 'Últimos 30 Dias' },
+                ].map((preset) => {
+                  const isActive = tracePreset === preset.id;
+                  return (
+                    <button
+                      key={preset.id}
+                      onClick={() => handlePresetChange(preset.id)}
+                      className={cn(
+                        "px-2.5 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-tight transition-all",
+                        isActive
+                          ? "bg-indigo-600 text-white shadow-sm"
+                          : "bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700"
+                      )}
+                    >
+                      {preset.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="h-px bg-slate-100 dark:bg-slate-800" />
+
+            {/* Inputs de Data Customizados */}
+            <div className="grid grid-cols-2 sm:flex sm:items-center gap-4">
+              <div className="space-y-1 sm:w-44">
+                <label className="block text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-wider">De (Início)</label>
+                <input
+                  type="date"
+                  value={traceStartDate}
+                  onChange={(e) => {
+                     setTraceStartDate(e.target.value);
+                     setTracePreset('custom');
+                  }}
+                  className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 text-xs font-bold text-slate-900 dark:text-white"
+                />
+              </div>
+
+              <div className="space-y-1 sm:w-44">
+                <label className="block text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-wider">Até (Fim)</label>
+                <input
+                  type="date"
+                  value={traceEndDate}
+                  onChange={(e) => {
+                     setTraceEndDate(e.target.value);
+                     setTracePreset('custom');
+                  }}
+                  className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 text-xs font-bold text-slate-900 dark:text-white"
+                />
+              </div>
+
+              {/* Informações Auxiliares */}
+              <div className="col-span-2 sm:col-span-1 sm:ml-auto flex items-center gap-2 self-end pb-1.5">
+                <span className="text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest bg-slate-100 dark:bg-slate-800 px-2.5 py-1 rounded-lg">
+                  Registros Exibidos: {filteredTracedResults.length} de {tracedResults.length}
+                </span>
+              </div>
+            </div>
+          </div>
 
           <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
              <div className="overflow-x-auto">
@@ -191,7 +336,7 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({ entries, globalSearc
                      </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                     {tracedResults.map((res, i) => (
+                     {filteredTracedResults.map((res, i) => (
                         <tr key={i} className="group hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-colors">
                            <td className="pl-6 pr-4 py-5">
                               <span className="font-bold text-slate-600 dark:text-slate-400 text-sm whitespace-nowrap">
@@ -225,11 +370,11 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({ entries, globalSearc
                            </td>
                         </tr>
                      ))}
-                     {tracedResults.length === 0 && (
+                     {filteredTracedResults.length === 0 && (
                         <tr>
                            <td colSpan={4} className="py-20 text-center text-slate-400">
                               <Package className="w-12 h-12 mx-auto opacity-20 mb-4" />
-                              <p className="font-bold px-6">Nenhum registro encontrado para "{globalSearch}"</p>
+                              <p className="font-bold px-6">Nenhum registro encontrado no período selecionado</p>
                            </td>
                         </tr>
                      )}
